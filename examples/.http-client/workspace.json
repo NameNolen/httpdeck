@@ -1,0 +1,6 @@
+{
+  "pinned": [
+    "api/httpbin.http"
+  ],
+  "selectedEnv": "local"
+}

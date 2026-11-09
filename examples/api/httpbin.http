@@ -1,0 +1,58 @@
+@base = {{host}}
+
+### 获取请求信息
+GET {{base}}/get?from={{appName}}&v={{apiVersion}}
+Accept: application/json
+X-Request-Id: {{$uuid}}
+
+> {%
+    client.test("状态码为 200", function () {
+        client.assert(response.status === 200, "期望 200，实际 " + response.status);
+    });
+    client.test("返回 JSON", function () {
+        client.assert(response.contentType.mimeType.indexOf("json") >= 0, "Content-Type 不是 JSON");
+    });
+    client.log("origin:", response.body.origin);
+    client.global.set("lastOrigin", response.body.origin);
+%}
+
+### 提交 JSON（带前置脚本变量）
+POST {{base}}/post
+Content-Type: application/json
+X-Env-User: {{user}}
+Authorization: Bearer {{token}}
+
+{
+  "name": "Alice",
+  "app": "{{appName}}",
+  "requestId": "{{$uuid}}",
+  "createdAt": "{{$isoTimestamp}}"
+}
+
+> {%
+    client.test("提交成功", function () {
+        client.assert(response.status === 200, "提交失败");
+        client.assert(response.body.json.name === "Alice", "name 字段不正确");
+    });
+%}
+
+### 保存响应到文件
+GET {{base}}/json
+Accept: application/json
+
+>>! ./out/httpbin-json.json
+
+### 前置脚本设置变量
+> {%
+    client.global.set("traceId", "trace-" + Date.now());
+%}
+
+GET {{base}}/headers
+Accept: application/json
+X-Trace-Id: {{traceId}}
+
+### 使用脚本文件
+GET {{base}}/get?from=script-file
+Accept: application/json
+
+> ./scripts/check.js
