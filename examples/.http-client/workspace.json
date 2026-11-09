@@ -2,5 +2,5 @@
   "pinned": [
     "api/httpbin.http"
   ],
-  "selectedEnv": "local"
+  "selectedEnv": "dev"
 }

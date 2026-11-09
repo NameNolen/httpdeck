@@ -40,6 +40,53 @@ function prettyBody(result: RequestResult): string {
   return result.body;
 }
 
+function tabText(result: RequestResult, tab: Tab, raw: boolean): string {
+  switch (tab) {
+    case "body":
+      return raw ? result.body : prettyBody(result);
+    case "headers":
+      return result.responseHeaders
+        .map((header) => `${header.name}: ${header.value}`)
+        .join("\n");
+    case "tests":
+      return result.tests
+        .map(
+          (test) =>
+            `${test.passed ? "PASS" : "FAIL"} ${test.name}${
+              test.passed ? "" : ` - ${test.message}`
+            }`
+        )
+        .join("\n");
+    case "console":
+      return result.logs.join("\n");
+    case "request":
+      return [
+        `${result.method} ${result.url}`,
+        ...result.requestHeaders.map((header) => `${header.name}: ${header.value}`),
+        result.requestBody !== null ? `\n${result.requestBody}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    default:
+      return "";
+  }
+}
+
+async function writeClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+}
+
 export function ResponsePanel({
   results,
   selectedIndex,
@@ -49,12 +96,24 @@ export function ResponsePanel({
 }: Props) {
   const [tab, setTab] = useState<Tab>("body");
   const [raw, setRaw] = useState(false);
+  const [copied, setCopied] = useState(false);
   const result = results[selectedIndex];
 
   useEffect(() => {
     setTab("body");
     setRaw(false);
   }, [selectedIndex, results.length]);
+
+  useEffect(() => {
+    setCopied(false);
+  }, [selectedIndex, tab]);
+
+  const copyCurrent = async () => {
+    if (!result) return;
+    await writeClipboard(tabText(result, tab, raw));
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
 
   if (running) {
     return (
@@ -140,12 +199,21 @@ export function ResponsePanel({
         <button className={tab === "request" ? "active" : ""} onClick={() => setTab("request")}>
           实际请求
         </button>
-        {tab === "body" && !result.bodyIsBinary && (
-          <label className="raw-toggle">
-            <input type="checkbox" checked={raw} onChange={(e) => setRaw(e.target.checked)} />
-            原始
-          </label>
-        )}
+        <div className="tabs-actions">
+          {tab === "body" && !result.bodyIsBinary && (
+            <label className="raw-toggle">
+              <input type="checkbox" checked={raw} onChange={(e) => setRaw(e.target.checked)} />
+              原始
+            </label>
+          )}
+          <button
+            className={`copy-button ${copied ? "copied" : ""}`}
+            onClick={() => void copyCurrent()}
+            title="复制当前标签页的内容"
+          >
+            {copied ? "已复制" : "⧉ 复制"}
+          </button>
+        </div>
       </div>
 
       <div className="response-content">

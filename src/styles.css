@@ -1034,6 +1034,38 @@ button:disabled {
   color: var(--muted-2);
 }
 
+.tabs-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tabs-actions .raw-toggle {
+  margin-left: 0;
+}
+
+.copy-button {
+  border: 1px solid var(--border) !important;
+  border-radius: 5px;
+  padding: 2px 8px !important;
+  font-size: 11px !important;
+  color: var(--muted) !important;
+  align-self: center;
+  border-bottom-color: var(--border) !important;
+}
+
+.copy-button:hover {
+  color: var(--text) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent-soft);
+}
+
+.copy-button.copied {
+  color: var(--green) !important;
+  border-color: var(--green) !important;
+}
+
 .raw-toggle input {
   accent-color: var(--accent);
 }
