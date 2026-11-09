@@ -11,6 +11,14 @@ interface Props {
 
 type Tab = "body" | "headers" | "tests" | "console" | "request";
 
+const tabLabels: Record<Tab, string> = {
+  body: "响应体",
+  headers: "响应头",
+  tests: "测试",
+  console: "控制台",
+  request: "实际请求",
+};
+
 function statusClass(status: number): string {
   if (status === 0) return "err";
   if (status >= 200 && status < 300) return "ok";
@@ -217,6 +225,15 @@ export function ResponsePanel({
       </div>
 
       <div className="response-content">
+        <div className="content-copy-row">
+          <button
+            className={`content-copy ${copied ? "copied" : ""}`}
+            onClick={() => void copyCurrent()}
+            title={`复制${tabLabels[tab]}`}
+          >
+            {copied ? "✓" : "⧉"}
+          </button>
+        </div>
         {result.error && <div className="banner error">{result.error}</div>}
         {result.scriptError && <div className="banner warn">脚本错误：{result.scriptError}</div>}
 
