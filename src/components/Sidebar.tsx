@@ -158,6 +158,7 @@ export function Sidebar({
           onClick={() => onOpenFile(node)}
           onContextMenu={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             setMenu({
               kind: "file",
               root: workspace.root,
@@ -254,6 +255,7 @@ export function Sidebar({
           onClick={() => onSelectWorkspace(workspace.root)}
           onContextMenu={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             setMenu({
               kind: "workspace",
               root: workspace.root,
