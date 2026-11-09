@@ -240,6 +240,14 @@ export default function App() {
     [workspaces, activeRoot, openFile]
   );
 
+  const openRequestFromTree = useCallback(
+    (node: FileNode, line: number) => {
+      openFileFromWorkspace(node);
+      setScrollTarget({ line, nonce: Date.now() });
+    },
+    [openFileFromWorkspace]
+  );
+
   useEffect(() => {
     if (!activePath) return;
     const content = contents[activePath];
@@ -548,6 +556,7 @@ export default function App() {
           onSelectWorkspace={setActiveRoot}
           onRemoveWorkspace={(root) => void removeWorkspace(root)}
           onOpenFile={openFileFromWorkspace}
+          onOpenRequest={openRequestFromTree}
           onTogglePin={(root, node, pinned) => void togglePin(root, node, pinned)}
           onRunFolder={(root, node) => void runFolder(root, node)}
         />

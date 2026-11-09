@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { FileNode, WorkspaceInfo } from "../api";
+import { api } from "../api";
+import type { FileNode, RequestSummary, WorkspaceInfo } from "../api";
 
 interface Props {
   workspaces: WorkspaceInfo[];
@@ -11,16 +12,21 @@ interface Props {
   onSelectWorkspace: (root: string) => void;
   onRemoveWorkspace: (root: string) => void;
   onOpenFile: (node: FileNode) => void;
+  onOpenRequest: (node: FileNode, line: number) => void;
   onTogglePin: (root: string, node: FileNode, pinned: boolean) => void;
   onRunFolder: (root: string, node: FileNode) => void;
 }
 
-interface MenuState {
-  root: string;
-  name: string;
-  x: number;
-  y: number;
-}
+type MenuState =
+  | { kind: "workspace"; root: string; name: string; x: number; y: number }
+  | {
+      kind: "file";
+      root: string;
+      node: FileNode;
+      pinned: boolean;
+      x: number;
+      y: number;
+    };
 
 function findNode(node: FileNode, relPath: string): FileNode | null {
   if (!node.isDir && node.relPath === relPath) return node;
@@ -41,10 +47,16 @@ export function Sidebar({
   onSelectWorkspace,
   onRemoveWorkspace,
   onOpenFile,
+  onOpenRequest,
   onTogglePin,
   onRunFolder,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const [fileRequests, setFileRequests] = useState<Record<string, RequestSummary[]>>(
+    {}
+  );
   const [menu, setMenu] = useState<MenuState | null>(null);
 
   useEffect(() => {
@@ -67,6 +79,39 @@ export function Sidebar({
       else next.add(path);
       return next;
     });
+  };
+
+  const toggleGroup = (root: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  };
+
+  const toggleFile = async (node: FileNode) => {
+    const path = node.path;
+    if (expandedFiles.has(path)) {
+      setExpandedFiles((prev) => {
+        const next = new Set(prev);
+        next.delete(path);
+        return next;
+      });
+      return;
+    }
+    setExpandedFiles((prev) => new Set(prev).add(path));
+    setFileRequests((prev) => {
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+    try {
+      const parsed = await api.parseHttpFile(path);
+      setFileRequests((prev) => ({ ...prev, [path]: parsed.requests }));
+    } catch {
+      setFileRequests((prev) => ({ ...prev, [path]: [] }));
+    }
   };
 
   const renderNode = (workspace: WorkspaceInfo, node: FileNode, depth: number) => {
@@ -102,27 +147,91 @@ export function Sidebar({
     }
 
     const pinned = workspace.pinned.includes(node.relPath);
+    const expanded = expandedFiles.has(node.path);
+    const requests = fileRequests[node.path];
+
     return (
-      <div
-        key={node.path}
-        className={`tree-row file ${activePath === node.path ? "active" : ""}`}
-        style={{ paddingLeft: 10 + depth * 14 }}
-        onClick={() => onOpenFile(node)}
-        title={node.path}
-      >
-        <span className="file-icon">HTTP</span>
-        <span className="tree-name">{node.name}</span>
-        {dirty[node.path] && <span className="dirty-dot" />}
-        <button
-          className={`row-action star ${pinned ? "active" : ""}`}
-          title={pinned ? "取消置顶" : "置顶到常用"}
-          onClick={(event) => {
-            event.stopPropagation();
-            onTogglePin(workspace.root, node, !pinned);
+      <div key={node.path}>
+        <div
+          className={`tree-row file ${activePath === node.path ? "active" : ""}`}
+          style={{ paddingLeft: 10 + depth * 14 }}
+          onClick={() => onOpenFile(node)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setMenu({
+              kind: "file",
+              root: workspace.root,
+              node,
+              pinned,
+              x: event.clientX,
+              y: event.clientY,
+            });
           }}
+          title={`${node.path}\n右键可展开请求列表`}
         >
-          {pinned ? "★" : "☆"}
-        </button>
+          <span className="file-icon">HTTP</span>
+          <span className="tree-name">{node.name}</span>
+          {dirty[node.path] && <span className="dirty-dot" />}
+          <button
+            className="row-action file-toggle"
+            title={expanded ? "折叠请求列表" : "展开请求列表"}
+            onClick={(event) => {
+              event.stopPropagation();
+              void toggleFile(node);
+            }}
+          >
+            {expanded ? "▾" : "▸"}
+          </button>
+          <button
+            className={`row-action star ${pinned ? "active" : ""}`}
+            title={pinned ? "取消置顶" : "置顶到常用"}
+            onClick={(event) => {
+              event.stopPropagation();
+              onTogglePin(workspace.root, node, !pinned);
+            }}
+          >
+            {pinned ? "★" : "☆"}
+          </button>
+        </div>
+
+        {expanded && (
+          <div className="file-requests">
+            {requests === undefined ? (
+              <div
+                className="request-hint"
+                style={{ paddingLeft: 10 + (depth + 1) * 14 + 12 }}
+              >
+                解析中…
+              </div>
+            ) : requests.length === 0 ? (
+              <div
+                className="request-hint"
+                style={{ paddingLeft: 10 + (depth + 1) * 14 + 12 }}
+              >
+                没有可运行的请求
+              </div>
+            ) : (
+              requests.map((request) => (
+                <div
+                  key={request.index}
+                  className="tree-row request"
+                  style={{ paddingLeft: 10 + (depth + 1) * 14 + 12 }}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenRequest(node, request.line);
+                  }}
+                  title={`${request.method} ${request.url}`}
+                >
+                  <span className={`mini-method ${request.method.toLowerCase()}`}>
+                    {request.method}
+                  </span>
+                  <span className="tree-name">{request.name}</span>
+                  <span className="request-line">L{request.line}</span>
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -132,6 +241,7 @@ export function Sidebar({
       .map((rel) => findNode(workspace.tree, rel))
       .filter((node): node is FileNode => node !== null);
     const isActive = workspace.root === activeRoot;
+    const isCollapsed = collapsedGroups.has(workspace.root);
 
     return (
       <section
@@ -145,6 +255,7 @@ export function Sidebar({
           onContextMenu={(event) => {
             event.preventDefault();
             setMenu({
+              kind: "workspace",
               root: workspace.root,
               name: workspace.name,
               x: event.clientX,
@@ -152,6 +263,16 @@ export function Sidebar({
             });
           }}
         >
+          <button
+            className="group-toggle"
+            title={isCollapsed ? "展开目录" : "折叠目录"}
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleGroup(workspace.root);
+            }}
+          >
+            {isCollapsed ? "▸" : "▾"}
+          </button>
           <div className="workspace-title">
             <span className="workspace-badge">
               {workspace.name.slice(0, 1).toUpperCase()}
@@ -163,7 +284,7 @@ export function Sidebar({
           </div>
         </div>
 
-        {pinnedNodes.length > 0 && (
+        {!isCollapsed && pinnedNodes.length > 0 && (
           <div className="pinned-section">
             <div className="section-label">置顶常用</div>
             {pinnedNodes.map((node) => (
@@ -195,15 +316,17 @@ export function Sidebar({
           </div>
         )}
 
-        <div className="tree-section">
-          {workspace.tree.children.length === 0 ? (
-            <div className="empty-tree">该目录下没有 .http / .rest 文件</div>
-          ) : (
-            <div className="tree">
-              {workspace.tree.children.map((node) => renderNode(workspace, node, 0))}
-            </div>
-          )}
-        </div>
+        {!isCollapsed && (
+          <div className="tree-section">
+            {workspace.tree.children.length === 0 ? (
+              <div className="empty-tree">该目录下没有 .http / .rest 文件</div>
+            ) : (
+              <div className="tree">
+                {workspace.tree.children.map((node) => renderNode(workspace, node, 0))}
+              </div>
+            )}
+          </div>
+        )}
       </section>
     );
   };
@@ -227,14 +350,39 @@ export function Sidebar({
           style={{ left: menu.x, top: menu.y }}
           onClick={(event) => event.stopPropagation()}
         >
-          <button
-            onClick={() => {
-              setMenu(null);
-              onRemoveWorkspace(menu.root);
-            }}
-          >
-            移除目录「{menu.name}」
-          </button>
+          {menu.kind === "workspace" ? (
+            <button
+              className="danger"
+              onClick={() => {
+                const target = menu;
+                setMenu(null);
+                onRemoveWorkspace(target.root);
+              }}
+            >
+              移除目录「{menu.name}」
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => {
+                  const target = menu;
+                  setMenu(null);
+                  void toggleFile(target.node);
+                }}
+              >
+                {expandedFiles.has(menu.node.path) ? "折叠请求列表" : "展开请求列表"}
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu;
+                  setMenu(null);
+                  onTogglePin(target.root, target.node, !target.pinned);
+                }}
+              >
+                {menu.pinned ? "取消置顶" : "置顶文件"}
+              </button>
+            </>
+          )}
         </div>
       )}
     </aside>
