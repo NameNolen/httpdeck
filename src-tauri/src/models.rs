@@ -99,6 +99,7 @@ pub struct WorkspaceInfo {
     pub envs: Vec<String>,
     pub selected_env: Option<String>,
     pub globals: Vec<KeyValue>,
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,6 +117,8 @@ pub struct CookieInfo {
 pub struct WorkspaceConfig {
     pub pinned: Vec<String>,
     pub selected_env: Option<String>,
+    /// 工作区级代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

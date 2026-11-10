@@ -130,6 +130,7 @@ fn build_workspace_info(state: &AppState, root: &Path) -> Result<WorkspaceInfo, 
         envs: envs.names,
         selected_env,
         globals: global_list,
+        proxy: config.proxy.clone(),
     })
 }
 
@@ -241,6 +242,19 @@ fn set_env(
 }
 
 #[tauri::command]
+fn set_proxy(
+    state: State<'_, AppState>,
+    workspace: String,
+    proxy: Option<String>,
+) -> Result<WorkspaceInfo, String> {
+    let root = canonical_root(&workspace)?;
+    let mut config = workspace::load_config(&root);
+    config.proxy = proxy.filter(|value| !value.trim().is_empty());
+    workspace::save_config(&root, &config)?;
+    build_workspace_info(&state, &root)
+}
+
+#[tauri::command]
 fn get_globals(state: State<'_, AppState>, workspace: String) -> Result<Vec<KeyValue>, String> {
     let root = canonical_root(&workspace)?;
     let (_, globals) = snapshot_runtime(&state, &root)?;
@@ -310,6 +324,7 @@ async fn run_request(
     let env_vars = env_vars_for(&root, &file_dir(&file), env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
+    let proxy = workspace::load_config(&root).proxy;
     let result = executor::execute_request(
         def,
         &file_vars,
@@ -318,6 +333,7 @@ async fn run_request(
         cookies.clone(),
         &file_dir(&file),
         Some(token),
+        proxy.as_deref(),
     )
     .await;
     clear_cancel_token(&state);
@@ -343,13 +359,21 @@ async fn run_file(
     let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
+    let proxy = workspace::load_config(&root).proxy;
     let mut results = Vec::new();
     for def in &parsed.requests {
         if token.is_cancelled() {
             break;
         }
         let result = executor::execute_request(
-            def, &file_vars, &env_vars, &mut globals, cookies.clone(), &dir, Some(token.clone()),
+            def,
+            &file_vars,
+            &env_vars,
+            &mut globals,
+            cookies.clone(),
+            &dir,
+            Some(token.clone()),
+            proxy.as_deref(),
         )
         .await;
         history::record(&root, &file, &result);
@@ -374,6 +398,7 @@ async fn run_folder(
     let env_name = resolve_env(&root, env);
     let files = workspace::collect_http_files(Path::new(&folder));
     let token = install_cancel_token(&state);
+    let proxy = workspace::load_config(&root).proxy;
     let mut output = Vec::new();
     for path in files {
         if token.is_cancelled() {
@@ -403,6 +428,7 @@ async fn run_folder(
                         cookies.clone(),
                         &dir,
                         Some(token.clone()),
+                        proxy.as_deref(),
                     )
                     .await;
                     history::record(&root, &file_string, &result);
@@ -461,6 +487,7 @@ pub fn run() {
             parse_http_text,
             set_pinned,
             set_env,
+            set_proxy,
             get_globals,
             clear_globals,
             run_request,

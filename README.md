@@ -85,7 +85,7 @@
 - [x] 目录级 `http-client.env.json`（目前只读取工作区根目录）
 - [x] `.env` 文件支持
 - [x] Cookie 持久化与 Cookie 查看器
-- [ ] 代理设置（HTTP / SOCKS5）
+- [x] 代理设置（HTTP / SOCKS5）
 - [x] 脚本执行超时与更强的沙箱限制（防止死循环）
 
 ### 中优先级

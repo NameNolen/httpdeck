@@ -62,6 +62,8 @@ export default function App() {
   const [historyQuery, setHistoryQuery] = useState("");
   const [cookiesOpen, setCookiesOpen] = useState(false);
   const [cookies, setCookies] = useState<CookieInfo[]>([]);
+  const [proxyOpen, setProxyOpen] = useState(false);
+  const [proxyInput, setProxyInput] = useState("");
   const [cursorLine, setCursorLine] = useState(1);
   const [scrollTarget, setScrollTarget] = useState<{ line: number; nonce: number } | null>(
     null
@@ -597,6 +599,26 @@ export default function App() {
     }
   }, [workspace]);
 
+  // 代理设置：工作区级，空为不使用代理
+  const openProxy = useCallback(() => {
+    setProxyInput(workspace?.proxy ?? "");
+    setProxyOpen(true);
+  }, [workspace]);
+
+  const saveProxy = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      upsertWorkspace(await api.setProxy(workspace.root, proxyInput.trim() || null));
+      setProxyOpen(false);
+      setNotice({
+        kind: "info",
+        message: proxyInput.trim() ? `已设置代理 ${proxyInput.trim()}` : "已关闭代理",
+      });
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  }, [workspace, proxyInput, upsertWorkspace]);
+
   const clearGlobals = useCallback(async () => {
     if (!workspace) return;
     try {
@@ -686,6 +708,14 @@ export default function App() {
             title="查看当前工作区的 Cookie"
           >
             Cookie
+          </button>
+          <button
+            className="ghost-button"
+            onClick={openProxy}
+            disabled={!workspace}
+            title="代理设置（HTTP / SOCKS5）"
+          >
+            代理{workspace?.proxy ? " ✓" : ""}
           </button>
           <button
             className="ghost-button"
@@ -1029,6 +1059,41 @@ export default function App() {
               </button>
               <button className="primary-button compact" onClick={() => setCookiesOpen(false)}>
                 关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {proxyOpen && (
+        <div className="modal-backdrop" onClick={() => setProxyOpen(false)}>
+          <div className="modal modal-narrow" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <h2>代理设置</h2>
+              <button className="icon-button" onClick={() => setProxyOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="modal-hint">
+                留空表示不使用代理。支持 http:// 、 https:// 与 socks5:// ，
+                例如 <code>http://127.0.0.1:7890</code> 或 <code>socks5://127.0.0.1:1080</code>。
+                设置保存在当前工作区的 <code>.http-client/workspace.json</code>。
+              </p>
+              <input
+                className="modal-input"
+                autoFocus
+                placeholder="http://127.0.0.1:7890"
+                value={proxyInput}
+                onChange={(event) => setProxyInput(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void saveProxy()}
+              />
+            </div>
+            <div className="modal-foot">
+              <button className="secondary-button" onClick={() => setProxyOpen(false)}>
+                取消
+              </button>
+              <button className="primary-button compact" onClick={() => void saveProxy()}>
+                保存
               </button>
             </div>
           </div>

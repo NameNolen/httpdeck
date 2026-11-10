@@ -49,6 +49,7 @@ pub async fn execute_request(
     cookies: Arc<SharedCookieStore>,
     base_dir: &Path,
     cancel: Option<Arc<CancelToken>>,
+    proxy: Option<&str>,
 ) -> RequestResult {
     if cancel.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
         return simple_failure(
@@ -278,6 +279,23 @@ pub async fn execute_request(
         .danger_accept_invalid_certs(def.options.accept_invalid_certs);
     if !def.options.no_cookie_jar {
         client_builder = client_builder.cookie_provider(cookies);
+    }
+    if let Some(proxy) = proxy.filter(|p| !p.trim().is_empty()) {
+        match reqwest::Proxy::all(proxy.trim()) {
+            Ok(proxy) => client_builder = client_builder.proxy(proxy),
+            Err(err) => {
+                return simple_failure(
+                    def,
+                    &url,
+                    &resolved_headers,
+                    body_preview,
+                    tests,
+                    logs,
+                    script_error,
+                    format!("代理地址无效 `{proxy}`: {err}"),
+                )
+            }
+        }
     }
     if !has_user_agent {
         client_builder = client_builder.user_agent("HttpDeck/0.1.0");
@@ -749,6 +767,7 @@ client.global.set("saved", response.body.name);
             Arc::new(SharedCookieStore::new()),
             Path::new("."),
             None,
+            None,
         )
         .await;
 
@@ -807,10 +826,83 @@ client.global.set("saved", response.body.name);
             Arc::new(SharedCookieStore::new()),
             Path::new("."),
             Some(token),
+            None,
         )
         .await;
 
         assert_eq!(result.status, 0);
         assert_eq!(result.error.as_deref(), Some("请求已取消"));
+    }
+
+    #[tokio::test]
+    async fn proxy_is_applied() {
+        use tokio::net::TcpListener;
+
+        // 目标服务器本身可用
+        let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = server.accept().await {
+                tokio::spawn(async move {
+                    // 先读完请求再响应，避免连接被提前重置
+                    let mut buffer = [0u8; 1024];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await;
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+                });
+            }
+        });
+
+        // 先占后放一个端口，得到几乎确定未监听的代理端口
+        let free_port = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+
+        let def = RequestDef {
+            index: 0,
+            name: None,
+            method: "GET".to_string(),
+            url: format!("http://{addr}/"),
+            headers: Vec::new(),
+            body: BodySpec::None,
+            pre_scripts: Vec::new(),
+            post_scripts: Vec::new(),
+            save_response: None,
+            options: Default::default(),
+            line: 1,
+        };
+
+        // 无代理时成功
+        let mut globals = HashMap::new();
+        let ok = execute_request(
+            &def,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut globals,
+            Arc::new(SharedCookieStore::new()),
+            Path::new("."),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(ok.status, 200, "{:?}", ok.error);
+
+        // 指向未监听端口的代理应失败，证明代理生效
+        let failed = execute_request(
+            &def,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut globals,
+            Arc::new(SharedCookieStore::new()),
+            Path::new("."),
+            None,
+            Some(&format!("http://127.0.0.1:{free_port}")),
+        )
+        .await;
+        assert_eq!(failed.status, 0);
+        assert!(failed.error.is_some());
     }
 }

@@ -66,6 +66,7 @@ export interface WorkspaceInfo {
   envs: string[];
   selectedEnv: string | null;
   globals: KeyValue[];
+  proxy: string | null;
 }
 
 export interface FileRunResult {
@@ -111,6 +112,8 @@ export const api = {
     invoke<WorkspaceInfo>("set_pinned", { workspace, file, pinned }),
   setEnv: (workspace: string, env: string | null) =>
     invoke<WorkspaceInfo>("set_env", { workspace, env }),
+  setProxy: (workspace: string, proxy: string | null) =>
+    invoke<WorkspaceInfo>("set_proxy", { workspace, proxy }),
   getGlobals: (workspace: string) => invoke<KeyValue[]>("get_globals", { workspace }),
   clearGlobals: (workspace: string) => invoke<void>("clear_globals", { workspace }),
   runRequest: (workspace: string, file: string, index: number, env: string | null) =>

@@ -1629,6 +1629,43 @@ body.v-drag {
   border-top: 1px solid var(--border);
 }
 
+.modal-narrow {
+  min-width: 380px;
+  max-width: 480px;
+}
+
+.modal-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.modal-hint code {
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: var(--accent);
+}
+
 /* ---------- history ---------- */
 .history-search {
   padding: 10px 16px 0;
