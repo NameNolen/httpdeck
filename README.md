@@ -90,7 +90,7 @@
 
 ### 中优先级
 
-- [ ] 使用 `reqwest::multipart` 结构化构建 multipart（当前为原始 body 替换文件引用）
+- [x] 使用 `reqwest::multipart` 结构化构建 multipart（文件引用按分段读取）
 - [ ] 完整 charset 解码（目前按 UTF-8 解码，非法时回退 Base64）
 - [ ] 变量自动补全与跳转定义
 - [ ] 响应内容大小阈值与超大响应虚拟滚动

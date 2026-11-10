@@ -41,6 +41,13 @@ impl CancelToken {
     }
 }
 
+/// 请求体：普通字节流或结构化 multipart 表单。
+enum PreparedBody {
+    None,
+    Bytes(Vec<u8>),
+    Multipart(reqwest::multipart::Form),
+}
+
 pub async fn execute_request(
     def: &RequestDef,
     file_vars: &HashMap<String, String>,
@@ -179,9 +186,14 @@ pub async fn execute_request(
         .iter()
         .map(|(n, v)| (n.clone(), variables::resolve(v, &ctx)))
         .collect();
-    let body_result = build_body(def, &ctx, base_dir);
-    let body_bytes = match body_result {
-        Ok(bytes) => bytes,
+    let multipart_content_type = resolved_headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| value.to_ascii_lowercase().starts_with("multipart/"));
+    let body_result = build_body(def, &ctx, base_dir, multipart_content_type.as_deref());
+    let (prepared_body, body_preview) = match body_result {
+        Ok(prepared) => prepared,
         Err(err) => {
             return simple_failure(
                 def,
@@ -195,7 +207,7 @@ pub async fn execute_request(
             )
         }
     };
-    let body_preview = body_bytes.as_ref().map(|bytes| preview_bytes(bytes));
+    let is_multipart = matches!(prepared_body, PreparedBody::Multipart(_));
 
     let method = match Method::from_bytes(def.method.as_bytes()) {
         Ok(method) => method,
@@ -231,6 +243,10 @@ pub async fn execute_request(
     let mut header_map = HeaderMap::new();
     let mut has_user_agent = false;
     for (name, value) in &resolved_headers {
+        // multipart 由 reqwest 生成新的 boundary，丢弃用户手写的 Content-Type
+        if is_multipart && name.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
         let header_name = match HeaderName::from_bytes(name.as_bytes()) {
             Ok(name) => name,
             Err(err) => {
@@ -317,8 +333,10 @@ pub async fn execute_request(
     };
 
     let mut request = client.request(method.clone(), parsed_url).headers(header_map);
-    if let Some(bytes) = body_bytes.clone() {
-        request = request.body(bytes);
+    match prepared_body {
+        PreparedBody::None => {}
+        PreparedBody::Bytes(bytes) => request = request.body(bytes),
+        PreparedBody::Multipart(form) => request = request.multipart(form),
     }
 
     let started = Instant::now();
@@ -493,21 +511,201 @@ fn build_body(
     def: &RequestDef,
     ctx: &VariableContext,
     base_dir: &Path,
-) -> Result<Option<Vec<u8>>, String> {
+    multipart_content_type: Option<&str>,
+) -> Result<(PreparedBody, Option<String>), String> {
     match &def.body {
-        BodySpec::None => Ok(None),
+        BodySpec::None => Ok((PreparedBody::None, None)),
         BodySpec::Inline(text) => {
             let resolved = variables::resolve(text, ctx);
-            Ok(Some(expand_file_refs(&resolved, base_dir)?))
+            if let Some(content_type) = multipart_content_type {
+                // 结构化 multipart 解析失败时退回原始字节替换，保证兼容性
+                if let Ok(form) = build_multipart_form(&resolved, content_type, base_dir) {
+                    return Ok((PreparedBody::Multipart(form), Some(resolved)));
+                }
+            }
+            let bytes = expand_file_refs(&resolved, base_dir)?;
+            Ok((PreparedBody::Bytes(bytes), Some(resolved)))
         }
         BodySpec::FromFile(path) => {
             let resolved = variables::resolve(path, ctx);
             let path = resolve_path(base_dir, &resolved);
             let bytes = std::fs::read(&path)
                 .map_err(|e| format!("读取请求体文件失败 {}: {e}", path.display()))?;
-            Ok(Some(bytes))
+            let preview = preview_bytes(&bytes);
+            Ok((PreparedBody::Bytes(bytes), Some(preview)))
         }
     }
+}
+
+/// 一个 multipart 分段的原始形态（尚未转换成分段内容）。
+struct RawPart {
+    headers: Vec<(String, String)>,
+    content: String,
+}
+
+/// 把 `.http` 中的 multipart 原始文本解析为 `reqwest::multipart::Form`。
+///
+/// 支持 IntelliJ 的文件引用语法：分段内容只有一行 `< ./file.bin` 时读取文件。
+fn build_multipart_form(
+    text: &str,
+    content_type: &str,
+    base_dir: &Path,
+) -> Result<reqwest::multipart::Form, String> {
+    let boundary = header_param(content_type, "boundary")
+        .or_else(|| detect_boundary(text))
+        .ok_or_else(|| "multipart 请求缺少 boundary".to_string())?;
+    let parts = split_multipart(text, &boundary);
+    if parts.is_empty() {
+        return Err("multipart 请求体中没有可解析的分段".to_string());
+    }
+    let mut form = reqwest::multipart::Form::new();
+    for part in parts {
+        let disposition = part
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-disposition"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("");
+        let Some(field_name) = header_param(disposition, "name").filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let filename = header_param(disposition, "filename").filter(|n| !n.is_empty());
+        let part_mime = part
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let file_ref = part_content_file_ref(&part.content);
+        let mut piece = match &file_ref {
+            Some(raw_path) => {
+                let path = resolve_path(base_dir, raw_path);
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| format!("读取文件内容失败 {}: {e}", path.display()))?;
+                reqwest::multipart::Part::bytes(bytes)
+            }
+            None => reqwest::multipart::Part::text(part.content),
+        };
+        if let Some(filename) = filename {
+            piece = piece.file_name(filename);
+        }
+        if let Some(mime) = part_mime {
+            piece = piece
+                .mime_str(&mime)
+                .map_err(|e| format!("multipart 分段 Content-Type 无效 `{mime}`: {e}"))?;
+        }
+        form = form.part(field_name, piece);
+    }
+    Ok(form)
+}
+
+/// 从 `Content-Type` 一类字符串中提取 `key=value` 参数（忽略大小写）。
+fn header_param(raw: &str, key: &str) -> Option<String> {
+    for segment in raw.split(';') {
+        let segment = segment.trim();
+        let Some((name, value)) = segment.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case(key) {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// 从请求体首行推断 boundary（兼容用户未写 Content-Type 的情况）。
+fn detect_boundary(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("--") {
+            let boundary = rest.trim_end_matches("--").trim();
+            if !boundary.is_empty() {
+                return Some(boundary.to_string());
+            }
+        }
+        if !trimmed.is_empty() {
+            return None;
+        }
+    }
+    None
+}
+
+/// 按 boundary 切分 multipart 文本，收集每段的分段头和内容。
+fn split_multipart(text: &str, boundary: &str) -> Vec<RawPart> {
+    let delimiter = format!("--{boundary}");
+    let closing = format!("{delimiter}--");
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut parts = Vec::new();
+    let mut index = 0usize;
+
+    // 跳过分隔符前的内容（preamble）
+    while index < lines.len() && lines[index].trim_end_matches('\r').trim() != delimiter {
+        index += 1;
+    }
+    index += 1;
+
+    while index < lines.len() {
+        let current = lines[index].trim_end_matches('\r').trim();
+        if current == closing {
+            break;
+        }
+        if current == delimiter {
+            index += 1;
+            continue;
+        }
+
+        let mut headers = Vec::new();
+        let mut terminated = false;
+        while index < lines.len() {
+            let line = lines[index].trim_end_matches('\r');
+            index += 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                terminated = true;
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        if !terminated {
+            break;
+        }
+
+        let mut content_lines = Vec::new();
+        while index < lines.len() {
+            let line = lines[index].trim_end_matches('\r');
+            let trimmed = line.trim();
+            if trimmed == delimiter || trimmed == closing {
+                break;
+            }
+            content_lines.push(line);
+            index += 1;
+        }
+        // 分段内容与下一个 boundary 之间的换行由 split 保留在内容里
+        parts.push(RawPart {
+            headers,
+            content: content_lines.join("\n"),
+        });
+    }
+
+    parts
+}
+
+/// 分段内容为单行 `< ./file` 时返回文件路径。
+fn part_content_file_ref(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    let rest = trimmed.strip_prefix('<')?.trim();
+    if rest.is_empty() || trimmed.contains('\n') {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 fn expand_file_refs(text: &str, base_dir: &Path) -> Result<Vec<u8>, String> {
@@ -904,5 +1102,104 @@ client.global.set("saved", response.body.name);
         .await;
         assert_eq!(failed.status, 0);
         assert!(failed.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn sends_structured_multipart_with_file_ref() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let dir = std::env::temp_dir().join(format!(
+            "httpdeck-multipart-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), "file-payload").unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+            let response =
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        let body = "--WebAppBoundary\n\
+Content-Disposition: form-data; name=\"title\"\n\
+\n\
+hello\n\
+--WebAppBoundary\n\
+Content-Disposition: form-data; name=\"file\"; filename=\"note.txt\"\n\
+Content-Type: text/plain\n\
+\n\
+< ./note.txt\n\
+--WebAppBoundary--";
+        let def = RequestDef {
+            index: 0,
+            name: None,
+            method: "POST".to_string(),
+            url: format!("http://{addr}/upload"),
+            headers: vec![(
+                "Content-Type".to_string(),
+                "multipart/form-data; boundary=WebAppBoundary".to_string(),
+            )],
+            body: BodySpec::Inline(body.to_string()),
+            pre_scripts: Vec::new(),
+            post_scripts: Vec::new(),
+            save_response: None,
+            options: Default::default(),
+            line: 1,
+        };
+
+        let mut globals = HashMap::new();
+        let result = execute_request(
+            &def,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut globals,
+            Arc::new(SharedCookieStore::new()),
+            &dir,
+            None,
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(result.status, 200, "{:?}", result.error);
+        let captured = rx.await.expect("captured request");
+        let lowercase = captured.to_ascii_lowercase();
+        assert!(lowercase.contains("content-type: multipart/form-data; boundary="));
+        assert!(!lowercase.contains("boundary=webappboundary"));
+        assert!(captured.contains("name=\"title\""));
+        assert!(captured.contains("hello"));
+        assert!(captured.contains("name=\"file\""));
+        assert!(captured.contains("filename=\"note.txt\""));
+        assert!(captured.contains("file-payload"));
     }
 }
