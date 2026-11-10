@@ -18,6 +18,9 @@ interface Props {
   onCreateFile: (root: string, parent: string) => void;
   onRenameFile: (root: string, node: FileNode) => void;
   onDeleteFile: (root: string, node: FileNode) => void;
+  recentFiles: string[];
+  onOpenRecent: (path: string) => void;
+  onClearRecent: () => void;
 }
 
 type MenuState =
@@ -41,6 +44,19 @@ function findNode(node: FileNode, relPath: string): FileNode | null {
   return null;
 }
 
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+function relativeDir(root: string, path: string): string {
+  return path
+    .slice(root.length)
+    .replace(/^[\\/]+/, "")
+    .split(/[\\/]/)
+    .slice(0, -1)
+    .join("/");
+}
+
 export function Sidebar({
   workspaces,
   activeRoot,
@@ -57,6 +73,9 @@ export function Sidebar({
   onCreateFile,
   onRenameFile,
   onDeleteFile,
+  recentFiles,
+  onOpenRecent,
+  onClearRecent,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -331,6 +350,39 @@ export function Sidebar({
                 >
                   ★
                 </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isCollapsed && isActive && recentFiles.length > 0 && (
+          <div className="pinned-section">
+            <div className="section-label">
+              <span>最近打开</span>
+              <button
+                className="link-button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onClearRecent();
+                }}
+              >
+                清空
+              </button>
+            </div>
+            {recentFiles.slice(0, 6).map((path) => (
+              <div
+                key={`recent-${path}`}
+                className={`tree-row file pinned-row ${
+                  activePath === path ? "active" : ""
+                }`}
+                onClick={() => onOpenRecent(path)}
+                title={path}
+              >
+                <span className="recent-icon">↺</span>
+                <span className="tree-name">{fileName(path)}</span>
+                <span className="pinned-dir">
+                  {relativeDir(workspace.root, path)}
+                </span>
               </div>
             ))}
           </div>

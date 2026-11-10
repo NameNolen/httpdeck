@@ -75,6 +75,7 @@ export default function App() {
   const [globalsOpen, setGlobalsOpen] = useState(false);
   const [globals, setGlobals] = useState<KeyValue[]>([]);
   const [envVars, setEnvVars] = useState<KeyValue[]>([]);
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
@@ -293,6 +294,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace?.root]);
 
+  const refreshRecentFiles = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      setRecentFiles(await api.listRecentFiles(workspace.root));
+    } catch {
+      setRecentFiles([]);
+    }
+  }, [workspace]);
+
+  useEffect(() => {
+    void refreshRecentFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.root]);
+
   useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(null), 7000);
@@ -320,8 +335,20 @@ export default function App() {
       } catch {
         // 解析错误在编辑时提示
       }
+      const owner = workspaces.find(
+        (item) =>
+          path === item.root ||
+          path.startsWith(`${item.root}\\`) ||
+          path.startsWith(`${item.root}/`)
+      );
+      if (owner) {
+        void api
+          .recordRecentFile(owner.root, path)
+          .then(setRecentFiles)
+          .catch(() => {});
+      }
     },
-    [contents]
+    [contents, workspaces]
   );
 
   const openFileFromWorkspace = useCallback(
@@ -345,6 +372,36 @@ export default function App() {
     },
     [openFileFromWorkspace]
   );
+
+  const openRecentFile = useCallback(
+    (path: string) => {
+      const owner = workspaces.find(
+        (item) =>
+          path === item.root ||
+          path.startsWith(`${item.root}\\`) ||
+          path.startsWith(`${item.root}/`)
+      );
+      if (owner && owner.root !== activeRoot) setActiveRoot(owner.root);
+      void openFile({
+        name: basename(path),
+        path,
+        relPath: owner ? relOf(owner.root, path) : "",
+        isDir: false,
+        children: [],
+      });
+    },
+    [workspaces, activeRoot, openFile]
+  );
+
+  const clearRecent = async () => {
+    if (!workspace) return;
+    try {
+      await api.clearRecentFiles(workspace.root);
+      setRecentFiles([]);
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  };
 
   // 文件重命名后同步已打开的标签与缓冲区
   const migrateOpenPath = (from: string, to: string) => {
@@ -873,6 +930,9 @@ export default function App() {
           onDeleteFile={(root, node) =>
             setFileDialog({ kind: "delete", root, path: node.path })
           }
+          recentFiles={recentFiles}
+          onOpenRecent={openRecentFile}
+          onClearRecent={() => void clearRecent()}
         />
 
         <main className="main">

@@ -87,6 +87,62 @@ fn clear_history(workspace: String) -> Result<(), String> {
     Ok(())
 }
 
+fn recent_files_path(root: &Path) -> PathBuf {
+    root.join(".http-client").join("recent-files.json")
+}
+
+fn load_recent_files(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(recent_files_path(root))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_recent_files(root: &Path, files: &[String]) -> Result<(), String> {
+    let path = recent_files_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录失败 {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(files)
+        .map_err(|e| format!("序列化最近文件失败: {e}"))?;
+    std::fs::write(&path, text)
+        .map_err(|e| format!("保存最近文件失败 {}: {e}", path.display()))
+}
+
+fn absolute_recent_files(root: &Path, files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .map(|rel| root.join(rel).to_string_lossy().to_string())
+        .filter(|path| Path::new(path).is_file())
+        .collect()
+}
+
+#[tauri::command]
+fn list_recent_files(workspace: String) -> Result<Vec<String>, String> {
+    let root = canonical_root(&workspace)?;
+    Ok(absolute_recent_files(&root, &load_recent_files(&root)))
+}
+
+#[tauri::command]
+fn record_recent_file(workspace: String, file: String) -> Result<Vec<String>, String> {
+    let root = canonical_root(&workspace)?;
+    let file = std::fs::canonicalize(&file).unwrap_or_else(|_| PathBuf::from(&file));
+    let rel = workspace::rel_path(&root, &file);
+    let mut files = load_recent_files(&root);
+    files.retain(|item| item != &rel);
+    files.insert(0, rel);
+    files.truncate(10);
+    save_recent_files(&root, &files)?;
+    Ok(absolute_recent_files(&root, &files))
+}
+
+#[tauri::command]
+fn clear_recent_files(workspace: String) -> Result<(), String> {
+    let root = canonical_root(&workspace)?;
+    save_recent_files(&root, &[])
+}
+
 fn canonical_root(path: &str) -> Result<PathBuf, String> {
     let root = std::fs::canonicalize(path).map_err(|e| format!("无法打开目录 {path}: {e}"))?;
     if !root.is_dir() {
@@ -292,8 +348,14 @@ fn rename_http_file(
     let new_rel = workspace::rel_path(&root, &target);
     let mut config = workspace::load_config(&root);
     if let Some(slot) = config.pinned.iter_mut().find(|item| **item == old_rel) {
-        *slot = new_rel;
+        *slot = new_rel.clone();
         workspace::save_config(&root, &config)?;
+    }
+    // 同步最近打开列表
+    let mut recent = load_recent_files(&root);
+    if let Some(slot) = recent.iter_mut().find(|item| **item == old_rel) {
+        *slot = new_rel;
+        save_recent_files(&root, &recent)?;
     }
     let info = build_workspace_info(&state, &root)?;
     Ok((info, target.to_string_lossy().to_string()))
@@ -317,6 +379,13 @@ fn delete_http_file(
     config.pinned.retain(|item| item != &rel);
     if config.pinned.len() != before {
         workspace::save_config(&root, &config)?;
+    }
+    // 从最近打开列表移除
+    let mut recent = load_recent_files(&root);
+    let before_recent = recent.len();
+    recent.retain(|item| item != &rel);
+    if recent.len() != before_recent {
+        save_recent_files(&root, &recent)?;
     }
     build_workspace_info(&state, &root)
 }
@@ -647,6 +716,9 @@ pub fn run() {
             cancel_run,
             list_history,
             clear_history,
+            list_recent_files,
+            record_recent_file,
+            clear_recent_files,
             list_cookies,
             clear_cookies,
             reveal_in_explorer
@@ -658,6 +730,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{validate_file_name, with_http_extension};
+    use std::path::Path;
 
     #[test]
     fn validates_and_completes_file_names() {
@@ -667,5 +740,30 @@ mod tests {
         assert!(validate_file_name("dir/demo.http").is_err());
         assert_eq!(with_http_extension("demo"), "demo.http");
         assert_eq!(with_http_extension("demo.rest"), "demo.rest");
+    }
+
+    #[test]
+    fn records_recent_files_uniquely() {
+        let dir = std::env::temp_dir().join(format!(
+            "httpdeck-recent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.http");
+        std::fs::write(&file, "### a").unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+        let workspace = root.to_string_lossy().to_string();
+        let file_path = std::fs::canonicalize(&file)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let first = super::record_recent_file(workspace.clone(), file_path.clone()).unwrap();
+        assert_eq!(first.len(), 1);
+        let second = super::record_recent_file(workspace, file_path).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(Path::new(&second[0]), root.join("a.http"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

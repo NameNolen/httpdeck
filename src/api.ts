@@ -115,6 +115,12 @@ export const api = {
     invoke<[WorkspaceInfo, string]>("rename_http_file", { workspace, file, name }),
   deleteHttpFile: (workspace: string, file: string) =>
     invoke<WorkspaceInfo>("delete_http_file", { workspace, file }),
+  listRecentFiles: (workspace: string) =>
+    invoke<string[]>("list_recent_files", { workspace }),
+  recordRecentFile: (workspace: string, file: string) =>
+    invoke<string[]>("record_recent_file", { workspace, file }),
+  clearRecentFiles: (workspace: string) =>
+    invoke<void>("clear_recent_files", { workspace }),
   parseHttpFile: (path: string) => invoke<ParsedFile>("parse_http_file", { path }),
   parseHttpText: (content: string) => invoke<ParsedFile>("parse_http_text", { content }),
   setPinned: (workspace: string, file: string, pinned: boolean) =>
