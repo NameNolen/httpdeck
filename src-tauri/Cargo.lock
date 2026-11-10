@@ -1378,6 +1378,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cookie_store",
+ "encoding_rs",
  "regex",
  "reqwest 0.12.28",
  "rquickjs",

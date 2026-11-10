@@ -432,7 +432,8 @@ pub async fn execute_request(
         }
     };
     let size = response_bytes.len();
-    let (body_text, body_is_binary) = decode_body(&response_bytes, mime_type.as_deref());
+    let (body_text, body_is_binary) =
+        decode_body(&response_bytes, mime_type.as_deref(), charset.as_deref());
 
     if !def.post_scripts.is_empty() {
         match load_scripts(&def.post_scripts, base_dir) {
@@ -449,7 +450,12 @@ pub async fn execute_request(
                     Some(&ScriptResponse {
                         status,
                         headers: response_headers.clone(),
-                        body_text: String::from_utf8_lossy(&response_bytes).to_string(),
+                        // 脚本拿到的是按 charset 解码后的文本；二进制响应退回宽松 UTF-8
+                        body_text: if body_is_binary {
+                            String::from_utf8_lossy(&response_bytes).to_string()
+                        } else {
+                            body_text.clone()
+                        },
                         mime_type: mime_type.clone(),
                         charset: charset.clone(),
                     }),
@@ -748,7 +754,11 @@ fn load_scripts(specs: &[ScriptSpec], base_dir: &Path) -> Result<Vec<String>, St
     Ok(scripts)
 }
 
-fn decode_body(bytes: &[u8], mime: Option<&str>) -> (String, bool) {
+fn decode_body(
+    bytes: &[u8],
+    mime: Option<&str>,
+    charset: Option<&str>,
+) -> (String, bool) {
     let text_like = mime
         .map(|m| {
             let m = m.to_ascii_lowercase();
@@ -763,16 +773,31 @@ fn decode_body(bytes: &[u8], mime: Option<&str>) -> (String, bool) {
                 || m.contains("graphql")
         })
         .unwrap_or(true);
-    if text_like {
-        match String::from_utf8(bytes.to_vec()) {
-            Ok(text) => (text, false),
-            Err(_) => (base64::engine::general_purpose::STANDARD.encode(bytes), true),
-        }
-    } else {
-        (
+    if !text_like {
+        return (
             base64::engine::general_purpose::STANDARD.encode(bytes),
             true,
-        )
+        );
+    }
+    // 1. 优先按 Content-Type 声明的 charset 解码
+    if let Some(label) = charset.map(str::trim).filter(|label| !label.is_empty()) {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            let (text, _, _) = encoding.decode(bytes);
+            return (text.into_owned(), false);
+        }
+    }
+    // 2. 没有可用 charset 时按 BOM 判断（UTF-8 / UTF-16）
+    if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
+        let (text, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
+        return (text.into_owned(), false);
+    }
+    // 3. 最后尝试严格 UTF-8，非法字节仍按二进制处理
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => (text, false),
+        Err(_) => (
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            true,
+        ),
     }
 }
 
@@ -890,12 +915,31 @@ mod tests {
 
     #[test]
     fn decodes_text_and_binary() {
-        let (text, binary) = decode_body(b"hello", Some("text/plain"));
+        let (text, binary) = decode_body(b"hello", Some("text/plain"), None);
         assert_eq!(text, "hello");
         assert!(!binary);
-        let (body, binary) = decode_body(&[0xff, 0x00], Some("application/octet-stream"));
+        let (body, binary) = decode_body(&[0xff, 0x00], Some("application/octet-stream"), None);
         assert!(binary);
         assert_eq!(body, "/wA=");
+        // 文本类型但非法 UTF-8、未声明 charset 时仍按二进制处理
+        let (body, binary) = decode_body(&[0xff, 0x00], Some("text/plain"), None);
+        assert!(binary);
+        assert_eq!(body, "/wA=");
+    }
+
+    #[test]
+    fn decodes_declared_charset_and_bom() {
+        // GBK 编码的“中文”
+        let (text, binary) = decode_body(&[0xd6, 0xd0, 0xce, 0xc4], Some("text/plain"), Some("gbk"));
+        assert_eq!(text, "中文");
+        assert!(!binary);
+
+        // UTF-16LE BOM + "hi"
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend_from_slice(&[b'h', 0, b'i', 0]);
+        let (text, binary) = decode_body(&utf16, Some("text/plain"), None);
+        assert_eq!(text, "hi");
+        assert!(!binary);
     }
 
     #[test]

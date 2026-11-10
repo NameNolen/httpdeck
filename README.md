@@ -91,7 +91,7 @@
 ### 中优先级
 
 - [x] 使用 `reqwest::multipart` 结构化构建 multipart（文件引用按分段读取）
-- [ ] 完整 charset 解码（目前按 UTF-8 解码，非法时回退 Base64）
+- [x] 完整 charset 解码（按 Content-Type charset，其次 BOM，最后 UTF-8，非法回退 Base64）
 - [ ] 变量自动补全与跳转定义
 - [ ] 响应内容大小阈值与超大响应虚拟滚动
 - [ ] 请求级超时/重定向状态的 UI 提示
@@ -223,6 +223,6 @@ httpdeck/
 ## 已知限制
 
 - 脚本只提供 `client` / `request` / `response` / `console`，没有文件系统与网络访问能力；单段脚本超过 5 秒会被中断。
-- 响应文本当前仅按 UTF-8 解码，非法字节会以 Base64 返回。
+- 响应文本优先按 `Content-Type` 的 charset 解码，其次按 BOM 判断，最后按 UTF-8；非法字节会以 Base64 返回。
 - 代理、认证助手尚未实现（见待办）。
 - 仅验证 Windows 构建。
