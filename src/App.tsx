@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
@@ -13,6 +13,7 @@ import { CodeEditor } from "./components/CodeEditor";
 import { ResponsePanel } from "./components/ResponsePanel";
 
 const LAST_ACTIVE_ROOT = "httpdeck.lastActiveRoot";
+const PANEL_HEIGHT_KEY = "httpdeck.panelHeight";
 
 const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
@@ -58,6 +59,36 @@ export default function App() {
   const [scrollTarget, setScrollTarget] = useState<{ line: number; nonce: number } | null>(
     null
   );
+  const [panelHeight, setPanelHeight] = useState<number | null>(() => {
+    const saved = Number(localStorage.getItem(PANEL_HEIGHT_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : null;
+  });
+
+  // 响应面板高度拖拽：在拖动期间监听全局鼠标事件
+  const startPanelDrag = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const panel = event.currentTarget.nextElementSibling as HTMLElement | null;
+    if (!panel) return;
+    const startY = event.clientY;
+    const startHeight = panel.offsetHeight;
+    const maxHeight = (panel.parentElement?.offsetHeight ?? window.innerHeight) - 220;
+    document.body.classList.add("v-drag");
+    const onMove = (e: MouseEvent) => {
+      const next = Math.min(Math.max(startHeight + (startY - e.clientY), 140), maxHeight);
+      setPanelHeight(next);
+    };
+    const onUp = () => {
+      document.body.classList.remove("v-drag");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setPanelHeight((current) => {
+        if (current) localStorage.setItem(PANEL_HEIGHT_KEY, String(current));
+        return current;
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
 
   const workspace = useMemo(
     () => workspaces.find((item) => item.root === activeRoot) ?? null,
@@ -699,6 +730,7 @@ export default function App() {
                 />
               </div>
 
+              <div className="panel-drag" onMouseDown={startPanelDrag} title="拖拽调整响应面板高度" />
               <ResponsePanel
                 results={results}
                 selectedIndex={resultIndex}
@@ -706,6 +738,7 @@ export default function App() {
                 running={running}
                 onSelect={setResultIndex}
                 onCancel={() => void api.cancelRun()}
+                height={panelHeight}
               />
             </>
           )}

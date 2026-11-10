@@ -8,6 +8,7 @@ interface Props {
   running: boolean;
   onSelect: (index: number) => void;
   onCancel: () => void;
+  height?: number | null;
 }
 
 type Tab = "body" | "headers" | "tests" | "console" | "request";
@@ -103,11 +104,15 @@ export function ResponsePanel({
   running,
   onSelect,
   onCancel,
+  height,
 }: Props) {
   const [tab, setTab] = useState<Tab>("body");
   const [raw, setRaw] = useState(false);
   const [copied, setCopied] = useState(false);
   const result = results[selectedIndex];
+  const panelStyle = height
+    ? { flexGrow: 0, flexShrink: 0, flexBasis: `${height}px` }
+    : undefined;
 
   useEffect(() => {
     setTab("body");
@@ -127,7 +132,7 @@ export function ResponsePanel({
 
   if (running) {
     return (
-      <section className="response-panel">
+      <section className="response-panel" style={panelStyle}>
         <div className="response-empty">
           <div className="spinner" />
           <div>正在发送请求…</div>
@@ -141,7 +146,7 @@ export function ResponsePanel({
 
   if (!result) {
     return (
-      <section className="response-panel">
+      <section className="response-panel" style={panelStyle}>
         <div className="response-empty">
           <div className="empty-mark">HTTP</div>
           <div>发送请求后在此查看响应</div>
@@ -154,7 +159,7 @@ export function ResponsePanel({
   const passed = result.tests.filter((test) => test.passed).length;
 
   return (
-    <section className="response-panel">
+    <section className="response-panel" style={panelStyle}>
       <div className="response-top">
         <div className="response-status">
           <span className={`status-badge ${statusClass(result.status)}`}>

@@ -927,6 +927,23 @@ button:disabled {
 }
 
 /* ---------- response ---------- */
+.panel-drag {
+  flex: 0 0 5px;
+  cursor: row-resize;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.panel-drag:hover,
+body.v-drag .panel-drag {
+  background: var(--accent);
+}
+
+body.v-drag {
+  cursor: row-resize;
+  user-select: none;
+}
+
 .response-panel {
   flex: 0 0 42%;
   min-height: 190px;
