@@ -243,14 +243,14 @@ fn clear_globals(state: State<'_, AppState>, workspace: String) -> Result<(), St
     Ok(())
 }
 
-fn env_vars_for(root: &Path, env: Option<&str>) -> HashMap<String, String> {
+fn env_vars_for(root: &Path, dir: &Path, env: Option<&str>) -> HashMap<String, String> {
     let Some(env) = env else {
         return HashMap::new();
     };
     if env.trim().is_empty() {
         return HashMap::new();
     }
-    envfile::load_envs(root).vars_for(env)
+    envfile::load_envs_chain(root, dir).vars_for(env)
 }
 
 fn resolve_env(root: &Path, requested: Option<String>) -> Option<String> {
@@ -290,7 +290,7 @@ async fn run_request(
         .get(index)
         .ok_or_else(|| format!("请求 #{index} 不存在"))?;
     let env_name = resolve_env(&root, env);
-    let env_vars = env_vars_for(&root, env_name.as_deref());
+    let env_vars = env_vars_for(&root, &file_dir(&file), env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
     let result = executor::execute_request(
@@ -320,9 +320,9 @@ async fn run_file(
     let (jar, mut globals) = snapshot_runtime(&state, &root)?;
     let parsed = read_parsed(&file)?;
     let env_name = resolve_env(&root, env);
-    let env_vars = env_vars_for(&root, env_name.as_deref());
-    let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let dir = file_dir(&file);
+    let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
+    let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
     let mut results = Vec::new();
     for def in &parsed.requests {
@@ -351,7 +351,6 @@ async fn run_folder(
     let root = canonical_root(&workspace)?;
     let (jar, mut globals) = snapshot_runtime(&state, &root)?;
     let env_name = resolve_env(&root, env);
-    let env_vars = env_vars_for(&root, env_name.as_deref());
     let files = workspace::collect_http_files(Path::new(&folder));
     let token = install_cancel_token(&state);
     let mut output = Vec::new();
@@ -366,8 +365,10 @@ async fn run_folder(
             .unwrap_or_else(|| file_string.clone());
         match read_parsed(&file_string) {
             Ok(parsed) => {
-                let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
                 let dir = file_dir(&file_string);
+                // 目录级环境：每个文件按自己的目录链解析
+                let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
+                let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
                 let mut results = Vec::new();
                 for def in &parsed.requests {
                     if token.is_cancelled() {

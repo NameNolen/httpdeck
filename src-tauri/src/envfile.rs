@@ -22,6 +22,60 @@ pub fn load_envs(root: &Path) -> EnvSet {
     merge(public, private)
 }
 
+/// 目录级环境：从工作区根到文件所在目录逐层读取 env 文件，
+/// 越靠近文件的目录优先级越高（覆盖同名变量）。
+/// 单层内的优先级与 load_envs 一致：$shared(公有) < 具名环境(公有) < $shared(私有) < 具名环境(私有)。
+pub fn load_envs_chain(root: &Path, dir: &Path) -> EnvSet {
+    let mut chain = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        chain.push(d.to_path_buf());
+        if d == root {
+            break;
+        }
+        current = d.parent();
+    }
+    chain.reverse();
+
+    let mut shared: HashMap<String, String> = HashMap::new();
+    let mut layers: BTreeMap<String, Vec<HashMap<String, String>>> = BTreeMap::new();
+    for level in chain {
+        let public = read_env_file(&level.join("http-client.env.json"));
+        let private = read_env_file(&level.join("http-client.private.env.json"));
+        apply_map(&mut shared, public.get("$shared"));
+        for (name, map) in &public {
+            if name != "$shared" {
+                layers.entry(name.clone()).or_default().push(flatten(map));
+            }
+        }
+        apply_map(&mut shared, private.get("$shared"));
+        for (name, map) in &private {
+            if name != "$shared" {
+                layers.entry(name.clone()).or_default().push(flatten(map));
+            }
+        }
+    }
+
+    let mut vars = BTreeMap::new();
+    for (name, list) in &layers {
+        let mut map = shared.clone();
+        for layer in list {
+            for (key, value) in layer {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+        vars.insert(name.clone(), map);
+    }
+    let names = layers.into_keys().collect();
+    EnvSet { names, vars }
+}
+
+fn flatten(source: &Map<String, Value>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    apply_map(&mut map, Some(source));
+    map
+}
+
 fn read_env_file(path: &Path) -> EnvMap {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -120,5 +174,38 @@ mod tests {
         assert_eq!(dev.get("token").unwrap(), "private");
         assert_eq!(dev.get("shared").unwrap(), "yes");
         assert_eq!(envs.vars_for("prod").get("token"), None);
+    }
+
+    #[test]
+    fn loads_envs_along_directory_chain() {
+        let base = std::env::temp_dir().join(format!("httpdeck-env-{}", uuid::Uuid::new_v4()));
+        let sub = base.join("api").join("v1");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            base.join("http-client.env.json"),
+            r#"{ "dev": { "host": "http://root", "token": "root-token" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("api").join("http-client.env.json"),
+            r#"{ "dev": { "host": "http://sub" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub.join("http-client.private.env.json"),
+            r#"{ "$shared": { "secret": "s3" } }"#,
+        )
+        .unwrap();
+
+        let envs = load_envs_chain(&base, &sub);
+        let dev = envs.vars_for("dev");
+        // 子目录覆盖根目录的同名变量
+        assert_eq!(dev.get("host").unwrap(), "http://sub");
+        // 根目录变量保留
+        assert_eq!(dev.get("token").unwrap(), "root-token");
+        // 最深处的 private $shared 也生效
+        assert_eq!(dev.get("secret").unwrap(), "s3");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
