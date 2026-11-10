@@ -244,13 +244,14 @@ fn clear_globals(state: State<'_, AppState>, workspace: String) -> Result<(), St
 }
 
 fn env_vars_for(root: &Path, dir: &Path, env: Option<&str>) -> HashMap<String, String> {
-    let Some(env) = env else {
-        return HashMap::new();
-    };
-    if env.trim().is_empty() {
-        return HashMap::new();
+    // .env 作为基础层，具名环境变量覆盖其上
+    let mut vars = envfile::load_dotenv_chain(root, dir);
+    if let Some(env) = env.filter(|value| !value.trim().is_empty()) {
+        for (key, value) in envfile::load_envs_chain(root, dir).vars_for(env) {
+            vars.insert(key, value);
+        }
     }
-    envfile::load_envs_chain(root, dir).vars_for(env)
+    vars
 }
 
 fn resolve_env(root: &Path, requested: Option<String>) -> Option<String> {

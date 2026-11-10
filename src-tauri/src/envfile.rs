@@ -76,6 +76,60 @@ fn flatten(source: &Map<String, Value>) -> HashMap<String, String> {
     map
 }
 
+/// 解析 .env 文件：KEY=VALUE 行，支持 # 注释、export 前缀与引号包裹的值。
+pub fn parse_dotenv(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        map.insert(key.to_string(), value.to_string());
+    }
+    map
+}
+
+/// 沿目录链（根 → 文件所在目录）读取所有 .env，近处覆盖远处。
+pub fn load_dotenv_chain(root: &Path, dir: &Path) -> HashMap<String, String> {
+    let mut chain = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        chain.push(d.to_path_buf());
+        if d == root {
+            break;
+        }
+        current = d.parent();
+    }
+    chain.reverse();
+
+    let mut map = HashMap::new();
+    for level in chain {
+        if let Ok(text) = std::fs::read_to_string(level.join(".env")) {
+            for (key, value) in parse_dotenv(&text) {
+                map.insert(key, value);
+            }
+        }
+    }
+    map
+}
+
 fn read_env_file(path: &Path) -> EnvMap {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -205,6 +259,31 @@ mod tests {
         assert_eq!(dev.get("token").unwrap(), "root-token");
         // 最深处的 private $shared 也生效
         assert_eq!(dev.get("secret").unwrap(), "s3");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn parses_dotenv_and_merges_chain() {
+        let parsed = parse_dotenv(
+            "# comment\nHOST=http://a\nexport TOKEN=\"t 1\"\nEMPTY=\nQUOTED='q'\nbad line\n",
+        );
+        assert_eq!(parsed.get("HOST").unwrap(), "http://a");
+        assert_eq!(parsed.get("TOKEN").unwrap(), "t 1");
+        assert_eq!(parsed.get("EMPTY").unwrap(), "");
+        assert_eq!(parsed.get("QUOTED").unwrap(), "q");
+        assert!(!parsed.contains_key("bad line"));
+
+        let base = std::env::temp_dir().join(format!("httpdeck-dotenv-{}", uuid::Uuid::new_v4()));
+        let sub = base.join("svc");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join(".env"), "HOST=http://root\nA=1\n").unwrap();
+        std::fs::write(sub.join(".env"), "HOST=http://sub\nB=2\n").unwrap();
+
+        let vars = load_dotenv_chain(&base, &sub);
+        assert_eq!(vars.get("HOST").unwrap(), "http://sub");
+        assert_eq!(vars.get("A").unwrap(), "1");
+        assert_eq!(vars.get("B").unwrap(), "2");
 
         std::fs::remove_dir_all(&base).ok();
     }
