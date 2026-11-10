@@ -3,6 +3,10 @@ use rquickjs::{Context, Ctx, Exception, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
+
+/// 脚本单次执行的最长时间，防止死循环阻塞请求。
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Default)]
 pub struct ScriptRequest {
@@ -58,6 +62,17 @@ pub fn run_scripts(
     request: &ScriptRequest,
     response: Option<&ScriptResponse>,
 ) -> ScriptOutcome {
+    run_scripts_with_timeout(scripts, globals, request_vars, request, response, SCRIPT_TIMEOUT)
+}
+
+fn run_scripts_with_timeout(
+    scripts: &[String],
+    globals: &HashMap<String, String>,
+    request_vars: &HashMap<String, String>,
+    request: &ScriptRequest,
+    response: Option<&ScriptResponse>,
+    timeout: Duration,
+) -> ScriptOutcome {
     if scripts.is_empty() {
         return ScriptOutcome {
             globals: globals.clone(),
@@ -77,6 +92,9 @@ pub fn run_scripts(
             }
         }
     };
+    // 超时中断：QuickJS 在执行期间周期性调用该回调，返回 true 即中断脚本
+    let deadline = Instant::now() + timeout;
+    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
     let context = match Context::full(&runtime) {
         Ok(ctx) => ctx,
         Err(err) => {
@@ -102,11 +120,19 @@ pub fn run_scripts(
         };
         for (index, script) in scripts.iter().enumerate() {
             if let Err(err) = ctx.eval::<(), _>(script.as_bytes()) {
-                error = Some(format!(
-                    "脚本第 {} 段执行失败: {}",
-                    index + 1,
-                    describe_error(&ctx, err)
-                ));
+                if Instant::now() >= deadline {
+                    error = Some(format!(
+                        "脚本第 {} 段执行超时（超过 {} 秒），已中断",
+                        index + 1,
+                        timeout.as_secs()
+                    ));
+                } else {
+                    error = Some(format!(
+                        "脚本第 {} 段执行失败: {}",
+                        index + 1,
+                        describe_error(&ctx, err)
+                    ));
+                }
                 break;
             }
         }
@@ -425,5 +451,21 @@ client.test("status", function() {
             None,
         );
         assert!(outcome.error.unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn interrupts_infinite_loop_on_timeout() {
+        let started = Instant::now();
+        let outcome = run_scripts_with_timeout(
+            &["while (true) {}".to_string()],
+            &HashMap::new(),
+            &HashMap::new(),
+            &ScriptRequest::default(),
+            None,
+            Duration::from_millis(200),
+        );
+        let error = outcome.error.expect("死循环应产生错误");
+        assert!(error.contains("超时"), "错误应提示超时: {error}");
+        assert!(started.elapsed() < Duration::from_secs(3), "应及时中断");
     }
 }
