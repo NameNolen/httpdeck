@@ -87,6 +87,14 @@ export interface HistoryEntry {
   error: string | null;
 }
 
+export interface CookieInfo {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires: string | null;
+}
+
 export const api = {
   initialWorkspace: () => invoke<string | null>("initial_workspace"),
   recentWorkspaces: () => invoke<string[]>("recent_workspaces"),
@@ -114,4 +122,6 @@ export const api = {
   cancelRun: () => invoke<void>("cancel_run"),
   listHistory: (workspace: string) => invoke<HistoryEntry[]>("list_history", { workspace }),
   clearHistory: (workspace: string) => invoke<void>("clear_history", { workspace }),
+  listCookies: (workspace: string) => invoke<CookieInfo[]>("list_cookies", { workspace }),
+  clearCookies: (workspace: string) => invoke<void>("clear_cookies", { workspace }),
 };

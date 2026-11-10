@@ -1,3 +1,4 @@
+mod cookies;
 mod envfile;
 mod executor;
 mod history;
@@ -8,17 +9,18 @@ mod script;
 mod variables;
 mod workspace;
 
+use cookies::SharedCookieStore;
 use models::{
-    FileRunResult, HistoryEntry, KeyValue, ParsedFileOutput, RequestResult, WorkspaceInfo,
+    CookieInfo, FileRunResult, HistoryEntry, KeyValue, ParsedFileOutput, RequestResult,
+    WorkspaceInfo,
 };
-use reqwest::cookie::Jar;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
 pub struct WorkspaceRuntime {
-    jar: Arc<Jar>,
+    cookies: Arc<SharedCookieStore>,
     globals: HashMap<String, String>,
 }
 
@@ -80,7 +82,7 @@ fn runtime_key(root: &Path) -> String {
 fn snapshot_runtime(
     state: &AppState,
     root: &Path,
-) -> Result<(Arc<Jar>, HashMap<String, String>), String> {
+) -> Result<(Arc<SharedCookieStore>, HashMap<String, String>), String> {
     let key = runtime_key(root);
     let guard = state
         .workspaces
@@ -89,7 +91,7 @@ fn snapshot_runtime(
     let runtime = guard
         .get(&key)
         .ok_or_else(|| "工作区尚未打开，请重新打开目录".to_string())?;
-    Ok((runtime.jar.clone(), runtime.globals.clone()))
+    Ok((runtime.cookies.clone(), runtime.globals.clone()))
 }
 
 fn store_globals(state: &AppState, root: &Path, globals: HashMap<String, String>) {
@@ -153,7 +155,7 @@ fn open_workspace(state: State<'_, AppState>, path: String) -> Result<WorkspaceI
             .lock()
             .map_err(|_| "工作区状态锁失败".to_string())?;
         guard.entry(key).or_insert_with(|| WorkspaceRuntime {
-            jar: Arc::new(Jar::default()),
+            cookies: cookies::load(&root),
             globals: HashMap::new(),
         });
     }
@@ -298,7 +300,7 @@ async fn run_request(
 ) -> Result<RequestResult, String> {
     let _guard = state.run_lock.lock().await;
     let root = canonical_root(&workspace)?;
-    let (jar, mut globals) = snapshot_runtime(&state, &root)?;
+    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
     let parsed = read_parsed(&file)?;
     let def = parsed
         .requests
@@ -313,13 +315,14 @@ async fn run_request(
         &file_vars,
         &env_vars,
         &mut globals,
-        jar,
+        cookies.clone(),
         &file_dir(&file),
         Some(token),
     )
     .await;
     clear_cancel_token(&state);
     history::record(&root, &file, &result);
+    cookies::save(&root, &cookies);
     store_globals(&state, &root, globals);
     Ok(result)
 }
@@ -333,7 +336,7 @@ async fn run_file(
 ) -> Result<Vec<RequestResult>, String> {
     let _guard = state.run_lock.lock().await;
     let root = canonical_root(&workspace)?;
-    let (jar, mut globals) = snapshot_runtime(&state, &root)?;
+    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
     let parsed = read_parsed(&file)?;
     let env_name = resolve_env(&root, env);
     let dir = file_dir(&file);
@@ -346,13 +349,14 @@ async fn run_file(
             break;
         }
         let result = executor::execute_request(
-            def, &file_vars, &env_vars, &mut globals, jar.clone(), &dir, Some(token.clone()),
+            def, &file_vars, &env_vars, &mut globals, cookies.clone(), &dir, Some(token.clone()),
         )
         .await;
         history::record(&root, &file, &result);
         results.push(result);
     }
     clear_cancel_token(&state);
+    cookies::save(&root, &cookies);
     store_globals(&state, &root, globals);
     Ok(results)
 }
@@ -366,7 +370,7 @@ async fn run_folder(
 ) -> Result<Vec<FileRunResult>, String> {
     let _guard = state.run_lock.lock().await;
     let root = canonical_root(&workspace)?;
-    let (jar, mut globals) = snapshot_runtime(&state, &root)?;
+    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
     let env_name = resolve_env(&root, env);
     let files = workspace::collect_http_files(Path::new(&folder));
     let token = install_cancel_token(&state);
@@ -396,7 +400,7 @@ async fn run_folder(
                         &file_vars,
                         &env_vars,
                         &mut globals,
-                        jar.clone(),
+                        cookies.clone(),
                         &dir,
                         Some(token.clone()),
                     )
@@ -420,8 +424,24 @@ async fn run_folder(
         }
     }
     clear_cancel_token(&state);
+    cookies::save(&root, &cookies);
     store_globals(&state, &root, globals);
     Ok(output)
+}
+
+#[tauri::command]
+fn list_cookies(state: State<'_, AppState>, workspace: String) -> Result<Vec<CookieInfo>, String> {
+    let root = canonical_root(&workspace)?;
+    let (cookies, _) = snapshot_runtime(&state, &root)?;
+    Ok(cookies::list(&cookies))
+}
+
+#[tauri::command]
+fn clear_cookies(state: State<'_, AppState>, workspace: String) -> Result<(), String> {
+    let root = canonical_root(&workspace)?;
+    let (cookies, _) = snapshot_runtime(&state, &root)?;
+    cookies::clear(&root, &cookies);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -448,7 +468,9 @@ pub fn run() {
             run_folder,
             cancel_run,
             list_history,
-            clear_history
+            clear_history,
+            list_cookies,
+            clear_cookies
         ])
         .run(tauri::generate_context!())
         .expect("error while running HttpDeck");

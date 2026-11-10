@@ -1335,6 +1335,18 @@ body.v-drag {
   word-break: break-all;
 }
 
+.kv-table th {
+  text-align: left;
+  padding: 5px 8px;
+  color: var(--muted);
+  font-weight: normal;
+  border-bottom: 1px solid var(--border);
+}
+
+.kv-table td.kv-mono {
+  font-family: var(--mono);
+}
+
 .kv-name {
   width: 32%;
   color: #9dbdff;

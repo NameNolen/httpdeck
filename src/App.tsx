@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMous
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
+  type CookieInfo,
   type FileNode,
   type HistoryEntry,
   type KeyValue,
@@ -59,6 +60,8 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
+  const [cookiesOpen, setCookiesOpen] = useState(false);
+  const [cookies, setCookies] = useState<CookieInfo[]>([]);
   const [cursorLine, setCursorLine] = useState(1);
   const [scrollTarget, setScrollTarget] = useState<{ line: number; nonce: number } | null>(
     null
@@ -573,6 +576,27 @@ export default function App() {
     );
   }, [history, historyQuery]);
 
+  // Cookie 查看器
+  const openCookies = useCallback(async () => {
+    if (!workspace) return;
+    setCookiesOpen(true);
+    try {
+      setCookies(await api.listCookies(workspace.root));
+    } catch {
+      setCookies([]);
+    }
+  }, [workspace]);
+
+  const clearCookies = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      await api.clearCookies(workspace.root);
+      setCookies([]);
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  }, [workspace]);
+
   const clearGlobals = useCallback(async () => {
     if (!workspace) return;
     try {
@@ -654,6 +678,14 @@ export default function App() {
             title="请求历史记录"
           >
             历史 <span className="count">{history.length}</span>
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => void openCookies()}
+            disabled={!workspace}
+            title="查看当前工作区的 Cookie"
+          >
+            Cookie
           </button>
           <button
             className="ghost-button"
@@ -944,6 +976,58 @@ export default function App() {
                 清空历史
               </button>
               <button className="primary-button compact" onClick={() => setHistoryOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {cookiesOpen && (
+        <div className="modal-backdrop" onClick={() => setCookiesOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <h2>Cookie（当前工作区）</h2>
+              <button className="icon-button" onClick={() => setCookiesOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {cookies.length === 0 ? (
+                <div className="kv-empty">暂无 Cookie</div>
+              ) : (
+                <table className="kv-table">
+                  <thead>
+                    <tr>
+                      <th>名称</th>
+                      <th>值</th>
+                      <th>域</th>
+                      <th>路径</th>
+                      <th>过期时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cookies.map((cookie) => (
+                      <tr key={`${cookie.domain}-${cookie.name}-${cookie.path}`}>
+                        <td>{cookie.name}</td>
+                        <td className="kv-mono">{cookie.value}</td>
+                        <td>{cookie.domain}</td>
+                        <td>{cookie.path}</td>
+                        <td>{cookie.expires ?? "会话"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button
+                className="secondary-button"
+                onClick={() => void clearCookies()}
+                disabled={cookies.length === 0}
+              >
+                清空 Cookie
+              </button>
+              <button className="primary-button compact" onClick={() => setCookiesOpen(false)}>
                 关闭
               </button>
             </div>

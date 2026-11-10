@@ -1,10 +1,10 @@
+﻿use crate::cookies::SharedCookieStore;
 use crate::models::{KeyValue, RequestResult};
 use crate::parser::{BodySpec, RequestDef, SaveSpec, ScriptSpec};
 use crate::script::{self, ScriptRequest, ScriptResponse};
 use crate::variables::{self, VariableContext};
 use base64::Engine;
 use regex::Regex;
-use reqwest::cookie::Jar;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, Url};
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ pub async fn execute_request(
     file_vars: &HashMap<String, String>,
     env_vars: &HashMap<String, String>,
     globals: &mut HashMap<String, String>,
-    jar: Arc<Jar>,
+    cookies: Arc<SharedCookieStore>,
     base_dir: &Path,
     cancel: Option<Arc<CancelToken>>,
 ) -> RequestResult {
@@ -277,7 +277,7 @@ pub async fn execute_request(
         .redirect(redirect)
         .danger_accept_invalid_certs(def.options.accept_invalid_certs);
     if !def.options.no_cookie_jar {
-        client_builder = client_builder.cookie_provider(jar);
+        client_builder = client_builder.cookie_provider(cookies);
     }
     if !has_user_agent {
         client_builder = client_builder.user_agent("HttpDeck/0.1.0");
@@ -746,7 +746,7 @@ client.global.set("saved", response.body.name);
             &HashMap::new(),
             &HashMap::new(),
             &mut globals,
-            Arc::new(Jar::default()),
+            Arc::new(SharedCookieStore::new()),
             Path::new("."),
             None,
         )
@@ -804,7 +804,7 @@ client.global.set("saved", response.body.name);
             &HashMap::new(),
             &HashMap::new(),
             &mut globals,
-            Arc::new(Jar::default()),
+            Arc::new(SharedCookieStore::new()),
             Path::new("."),
             Some(token),
         )
