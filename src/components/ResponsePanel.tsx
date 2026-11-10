@@ -43,6 +43,11 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function formatTimeout(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  return ms % 1000 === 0 ? `${ms / 1000} s` : `${(ms / 1000).toFixed(1)} s`;
+}
+
 function prettyBody(result: RequestResult): string {
   if (result.bodyIsBinary) return result.body;
   if (result.body.length > PRETTY_LIMIT) return result.body;
@@ -298,6 +303,22 @@ export function ResponsePanel({
           <span className="metric">{result.durationMs} ms</span>
           <span className="metric">{formatSize(result.size)}</span>
           {result.mimeType && <span className="metric mime">{result.mimeType}</span>}
+          {result.timeoutMs != null && (
+            <span className="metric flag" title="请求级超时（// @timeout）">
+              超时 {formatTimeout(result.timeoutMs)}
+            </span>
+          )}
+          {result.noRedirect ? (
+            <span className="metric flag warn" title="// @no-redirect 已关闭重定向跟随">
+              不跟随重定向
+            </span>
+          ) : (
+            result.redirected && (
+              <span className="metric flag" title="响应来自重定向后的最终地址">
+                已跟随重定向
+              </span>
+            )
+          )}
           {result.savedTo && (
             <span className="metric saved" title={result.savedTo}>
               已保存响应

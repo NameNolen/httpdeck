@@ -138,6 +138,9 @@ pub async fn execute_request(
                         logs,
                         script_error: Some(err),
                         saved_to: None,
+                        timeout_ms: def.options.timeout_ms,
+                        no_redirect: def.options.no_redirect,
+                        redirected: false,
                         error: Some("前置脚本执行失败，请求未发送".to_string()),
                     };
                 }
@@ -168,6 +171,9 @@ pub async fn execute_request(
                     logs,
                     script_error: Some(err.clone()),
                     saved_to: None,
+                    timeout_ms: def.options.timeout_ms,
+                    no_redirect: def.options.no_redirect,
+                    redirected: false,
                     error: Some(err),
                 };
             }
@@ -332,7 +338,9 @@ pub async fn execute_request(
         }
     };
 
-    let mut request = client.request(method.clone(), parsed_url).headers(header_map);
+    let mut request = client
+        .request(method.clone(), parsed_url.clone())
+        .headers(header_map);
     match prepared_body {
         PreparedBody::None => {}
         PreparedBody::Bytes(bytes) => request = request.body(bytes),
@@ -382,6 +390,7 @@ pub async fn execute_request(
         .canonical_reason()
         .unwrap_or_default()
         .to_string();
+    let redirected = response.url() != &parsed_url;
     let response_headers: Vec<(String, String)> = response
         .headers()
         .iter()
@@ -509,6 +518,9 @@ pub async fn execute_request(
         logs,
         script_error,
         saved_to,
+        timeout_ms: def.options.timeout_ms,
+        no_redirect: def.options.no_redirect,
+        redirected,
         error: None,
     }
 }
@@ -905,6 +917,9 @@ fn simple_failure(
         logs,
         script_error,
         saved_to: None,
+        timeout_ms: def.options.timeout_ms,
+        no_redirect: def.options.no_redirect,
+        redirected: false,
         error: Some(message),
     }
 }
@@ -996,7 +1011,11 @@ client.global.set("saved", response.body.name);
             pre_scripts: Vec::new(),
             post_scripts: vec![ScriptSpec::Inline(script.to_string())],
             save_response: None,
-            options: Default::default(),
+            options: crate::models::RequestOptions {
+                timeout_ms: Some(1234),
+                no_redirect: true,
+                ..Default::default()
+            },
             line: 1,
         };
 
@@ -1020,6 +1039,9 @@ client.global.set("saved", response.body.name);
         assert!(result.tests[0].passed);
         assert_eq!(result.mime_type.as_deref(), Some("application/json"));
         assert_eq!(globals.get("saved").map(String::as_str), Some("test"));
+        assert_eq!(result.timeout_ms, Some(1234));
+        assert!(result.no_redirect);
+        assert!(!result.redirected);
     }
 
     #[tokio::test]
@@ -1146,6 +1168,64 @@ client.global.set("saved", response.body.name);
         .await;
         assert_eq!(failed.status, 0);
         assert!(failed.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn reports_redirect_state() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let request = String::from_utf8_lossy(&buf);
+                let response = if request.starts_with("GET /final") {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                } else {
+                    "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let def = RequestDef {
+            index: 0,
+            name: None,
+            method: "GET".to_string(),
+            url: format!("http://{addr}/start"),
+            headers: Vec::new(),
+            body: BodySpec::None,
+            pre_scripts: Vec::new(),
+            post_scripts: Vec::new(),
+            save_response: None,
+            options: Default::default(),
+            line: 1,
+        };
+
+        let mut globals = HashMap::new();
+        let result = execute_request(
+            &def,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut globals,
+            Arc::new(SharedCookieStore::new()),
+            Path::new("."),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(result.status, 200, "{:?}", result.error);
+        assert!(result.redirected);
+        assert!(!result.no_redirect);
+        assert_eq!(result.timeout_ms, None);
     }
 
     #[tokio::test]

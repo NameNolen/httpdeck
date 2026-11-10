@@ -1022,6 +1022,14 @@ body.v-drag {
   color: var(--green);
 }
 
+.metric.flag {
+  color: #9dbdff;
+}
+
+.metric.flag.warn {
+  color: #d6b25e;
+}
+
 .response-label {
   font-size: 11px;
   color: var(--muted-2);

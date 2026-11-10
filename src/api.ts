@@ -48,6 +48,9 @@ export interface RequestResult {
   scriptError: string | null;
   savedTo: string | null;
   error: string | null;
+  timeoutMs: number | null;
+  noRedirect: boolean;
+  redirected: boolean;
 }
 
 export interface FileNode {

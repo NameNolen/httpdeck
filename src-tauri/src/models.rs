@@ -68,6 +68,12 @@ pub struct RequestResult {
     pub script_error: Option<String>,
     pub saved_to: Option<String>,
     pub error: Option<String>,
+    /// 请求级超时（毫秒），仅当 `.http` 中显式设置时才有值
+    pub timeout_ms: Option<u64>,
+    /// 是否通过 `// @no-redirect` 关闭了重定向跟随
+    pub no_redirect: bool,
+    /// 响应是否由重定向产生
+    pub redirected: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

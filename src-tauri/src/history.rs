@@ -81,6 +81,9 @@ mod tests {
             logs: Vec::new(),
             script_error: None,
             saved_to: None,
+            timeout_ms: None,
+            no_redirect: false,
+            redirected: false,
             error: None,
         }
     }
