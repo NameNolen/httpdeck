@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { RequestResult } from "../api";
 import { JsonTree } from "./JsonTree";
 
@@ -13,6 +13,14 @@ interface Props {
 }
 
 type Tab = "body" | "headers" | "tests" | "console" | "request";
+
+/// 响应体超过该长度时关闭自动美化和 JSON 树解析，避免卡顿
+const PRETTY_LIMIT = 1_000_000;
+/// 响应体超过该长度时使用虚拟滚动渲染
+const VIRTUAL_LIMIT = 1_000_000;
+/// 虚拟滚动行高，需与 styles.css 中 .virtual-line 保持一致
+const LINE_HEIGHT = 20;
+const OVERSCAN = 20;
 
 const tabLabels: Record<Tab, string> = {
   body: "响应体",
@@ -37,6 +45,7 @@ function formatSize(bytes: number): string {
 
 function prettyBody(result: RequestResult): string {
   if (result.bodyIsBinary) return result.body;
+  if (result.body.length > PRETTY_LIMIT) return result.body;
   const parsed = parseJsonBody(result);
   if (parsed !== undefined) {
     return JSON.stringify(parsed, null, 2);
@@ -125,6 +134,56 @@ function tabText(result: RequestResult, tab: Tab, raw: boolean): string {
   }
 }
 
+/// 超大响应按行虚拟滚动，只渲染可视区域
+function VirtualCode({ text, query }: { text: string; query: string }) {
+  const lines = useMemo(() => text.split("\n"), [text]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewport, setViewport] = useState(0);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const update = () => setViewport(element.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [text]);
+
+  const start = Math.max(0, Math.floor(scrollTop / LINE_HEIGHT) - OVERSCAN);
+  const end = Math.min(
+    lines.length,
+    Math.ceil((scrollTop + viewport) / LINE_HEIGHT) + OVERSCAN
+  );
+
+  return (
+    <div
+      className="virtual-code"
+      ref={scrollRef}
+      onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+    >
+      <div className="virtual-canvas" style={{ height: lines.length * LINE_HEIGHT }}>
+        <div
+          className="virtual-lines"
+          style={{ transform: `translateY(${start * LINE_HEIGHT}px)` }}
+        >
+          {lines.slice(start, end).map((line, index) => (
+            <div className="virtual-line" key={start + index}>
+              {highlightText(line, query)}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 async function writeClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -158,7 +217,10 @@ export function ResponsePanel({
     ? { flexGrow: 0, flexShrink: 0, flexBasis: `${height}px` }
     : undefined;
   const jsonData = useMemo(
-    () => (result ? parseJsonBody(result) : undefined),
+    () =>
+      result && result.body.length <= PRETTY_LIMIT
+        ? parseJsonBody(result)
+        : undefined,
     [result]
   );
 
@@ -174,7 +236,9 @@ export function ResponsePanel({
 
   const copyCurrent = async () => {
     if (!result) return;
-    await writeClipboard(tabText(result, tab, view === "raw"));
+    await writeClipboard(
+      tabText(result, tab, view === "raw" || result.body.length > PRETTY_LIMIT)
+    );
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };
@@ -213,6 +277,13 @@ export function ResponsePanel({
   }
 
   const passed = result.tests.filter((test) => test.passed).length;
+  const oversized = result.body.length > PRETTY_LIMIT;
+  const displayText =
+    view === "raw" || oversized ? result.body : prettyBody(result);
+  const virtualMode =
+    tab === "body" &&
+    view !== "tree" &&
+    displayText.length > VIRTUAL_LIMIT;
 
   return (
     <section className="response-panel" style={panelStyle}>
@@ -325,7 +396,7 @@ export function ResponsePanel({
         </div>
       </div>
 
-      <div className="response-content">
+      <div className={`response-content ${virtualMode ? "virtual" : ""}`}>
         <div className="content-copy-row">
           <button
             className={`content-copy ${copied ? "copied" : ""}`}
@@ -343,14 +414,19 @@ export function ResponsePanel({
             {result.bodyIsBinary && (
               <div className="banner info">二进制响应，以下内容为 Base64 编码</div>
             )}
+            {oversized && (
+              <div className="banner info">
+                响应较大（{formatSize(result.size)}），已关闭自动美化与 JSON
+                树；使用虚拟滚动渲染。
+              </div>
+            )}
             {view === "tree" && jsonData !== undefined ? (
               <JsonTree data={jsonData} />
+            ) : virtualMode ? (
+              <VirtualCode text={displayText} query={query} />
             ) : (
               <pre className="code-block">
-                {highlightText(
-                  view === "raw" ? result.body : prettyBody(result),
-                  query
-                )}
+                {highlightText(displayText, query)}
               </pre>
             )}
           </>
