@@ -245,6 +245,16 @@ button:disabled {
   border-color: #5f9bff;
 }
 
+.primary-button.danger {
+  background: #b3261e;
+  border-color: #b3261e;
+}
+
+.primary-button.danger:hover:not(:disabled) {
+  background: #c9362e;
+  border-color: #c9362e;
+}
+
 .primary-button.compact,
 .secondary-button {
   padding: 5px 12px;

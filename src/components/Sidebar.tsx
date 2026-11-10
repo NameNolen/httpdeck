@@ -15,6 +15,9 @@ interface Props {
   onOpenRequest: (node: FileNode, line: number) => void;
   onTogglePin: (root: string, node: FileNode, pinned: boolean) => void;
   onRunFolder: (root: string, node: FileNode) => void;
+  onCreateFile: (root: string, parent: string) => void;
+  onRenameFile: (root: string, node: FileNode) => void;
+  onDeleteFile: (root: string, node: FileNode) => void;
 }
 
 type MenuState =
@@ -51,6 +54,9 @@ export function Sidebar({
   onOpenRequest,
   onTogglePin,
   onRunFolder,
+  onCreateFile,
+  onRenameFile,
+  onDeleteFile,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -370,6 +376,15 @@ export function Sidebar({
                 onClick={() => {
                   const target = menu;
                   setMenu(null);
+                  onCreateFile(target.root, target.root);
+                }}
+              >
+                新建 .http 文件
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu;
+                  setMenu(null);
                   void api.revealInExplorer(target.root);
                 }}
               >
@@ -388,6 +403,15 @@ export function Sidebar({
             </>
           ) : menu.kind === "folder" ? (
             <>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "folder" }>;
+                  setMenu(null);
+                  onCreateFile(target.root, target.node.path);
+                }}
+              >
+                新建 .http 文件
+              </button>
               <button
                 disabled={running}
                 onClick={() => {
@@ -436,6 +460,25 @@ export function Sidebar({
                 }}
               >
                 在资源管理器中打开
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
+                  setMenu(null);
+                  onRenameFile(target.root, target.node);
+                }}
+              >
+                重命名
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
+                  setMenu(null);
+                  onDeleteFile(target.root, target.node);
+                }}
+              >
+                删除文件
               </button>
             </>
           )}

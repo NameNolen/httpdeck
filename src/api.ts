@@ -109,6 +109,12 @@ export const api = {
   readHttpFile: (path: string) => invoke<string>("read_http_file", { path }),
   saveHttpFile: (path: string, content: string) =>
     invoke<void>("save_http_file", { path, content }),
+  createHttpFile: (workspace: string, parent: string, name: string) =>
+    invoke<[WorkspaceInfo, string]>("create_http_file", { workspace, parent, name }),
+  renameHttpFile: (workspace: string, file: string, name: string) =>
+    invoke<[WorkspaceInfo, string]>("rename_http_file", { workspace, file, name }),
+  deleteHttpFile: (workspace: string, file: string) =>
+    invoke<WorkspaceInfo>("delete_http_file", { workspace, file }),
   parseHttpFile: (path: string) => invoke<ParsedFile>("parse_http_file", { path }),
   parseHttpText: (content: string) => invoke<ParsedFile>("parse_http_text", { content }),
   setPinned: (workspace: string, file: string, pinned: boolean) =>

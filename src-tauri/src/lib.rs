@@ -211,6 +211,116 @@ fn save_http_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("保存文件失败 {path}: {e}"))
 }
 
+/// 校验用户输入的文件名，不允许路径分隔符与上级目录引用
+fn validate_file_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("文件名不能为空".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("文件名不能包含路径分隔符或 ..".to_string());
+    }
+    Ok(name.to_string())
+}
+
+/// 新建文件时未写扩展名则补 `.http`
+fn with_http_extension(name: &str) -> String {
+    if name.contains('.') {
+        name.to_string()
+    } else {
+        format!("{name}.http")
+    }
+}
+
+#[tauri::command]
+fn create_http_file(
+    state: State<'_, AppState>,
+    workspace: String,
+    parent: String,
+    name: String,
+) -> Result<(WorkspaceInfo, String), String> {
+    let root = canonical_root(&workspace)?;
+    let name = with_http_extension(&validate_file_name(&name)?);
+    let dir = if parent.trim().is_empty() {
+        root.clone()
+    } else {
+        PathBuf::from(&parent)
+    };
+    if !dir.is_dir() {
+        return Err(format!("目录不存在: {}", dir.display()));
+    }
+    let target = dir.join(&name);
+    if target.exists() {
+        return Err(format!("文件已存在: {name}"));
+    }
+    std::fs::write(&target, "### 新建请求\nGET https://example.com\n\n")
+        .map_err(|e| format!("创建文件失败 {}: {e}", target.display()))?;
+    let info = build_workspace_info(&state, &root)?;
+    Ok((info, target.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn rename_http_file(
+    state: State<'_, AppState>,
+    workspace: String,
+    file: String,
+    name: String,
+) -> Result<(WorkspaceInfo, String), String> {
+    let root = canonical_root(&workspace)?;
+    let source = PathBuf::from(&file);
+    if !source.is_file() {
+        return Err(format!("文件不存在: {file}"));
+    }
+    let mut new_name = validate_file_name(&name)?;
+    if !new_name.contains('.') {
+        if let Some(ext) = source.extension() {
+            new_name.push('.');
+            new_name.push_str(&ext.to_string_lossy());
+        }
+    }
+    let dir = source
+        .parent()
+        .ok_or_else(|| "无法确定文件所在目录".to_string())?;
+    let target = dir.join(&new_name);
+    if target != source && target.exists() {
+        return Err(format!("目标文件已存在: {new_name}"));
+    }
+    std::fs::rename(&source, &target).map_err(|e| format!("重命名失败: {e}"))?;
+
+    // 同步置顶列表中的相对路径
+    let old_rel = workspace::rel_path(&root, &source);
+    let new_rel = workspace::rel_path(&root, &target);
+    let mut config = workspace::load_config(&root);
+    if let Some(slot) = config.pinned.iter_mut().find(|item| **item == old_rel) {
+        *slot = new_rel;
+        workspace::save_config(&root, &config)?;
+    }
+    let info = build_workspace_info(&state, &root)?;
+    Ok((info, target.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn delete_http_file(
+    state: State<'_, AppState>,
+    workspace: String,
+    file: String,
+) -> Result<WorkspaceInfo, String> {
+    let root = canonical_root(&workspace)?;
+    let target = PathBuf::from(&file);
+    if !target.is_file() {
+        return Err(format!("文件不存在: {file}"));
+    }
+    std::fs::remove_file(&target).map_err(|e| format!("删除文件失败: {e}"))?;
+    let rel = workspace::rel_path(&root, &target);
+    let mut config = workspace::load_config(&root);
+    let before = config.pinned.len();
+    config.pinned.retain(|item| item != &rel);
+    if config.pinned.len() != before {
+        workspace::save_config(&root, &config)?;
+    }
+    build_workspace_info(&state, &root)
+}
+
 #[tauri::command]
 fn parse_http_file(path: String) -> Result<ParsedFileOutput, String> {
     let content = std::fs::read_to_string(&path)
@@ -520,6 +630,9 @@ pub fn run() {
             refresh_workspace,
             read_http_file,
             save_http_file,
+            create_http_file,
+            rename_http_file,
+            delete_http_file,
             parse_http_file,
             parse_http_text,
             set_pinned,
@@ -540,4 +653,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running HttpDeck");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_file_name, with_http_extension};
+
+    #[test]
+    fn validates_and_completes_file_names() {
+        assert_eq!(validate_file_name("  demo  ").unwrap(), "demo");
+        assert!(validate_file_name("   ").is_err());
+        assert!(validate_file_name("../demo").is_err());
+        assert!(validate_file_name("dir/demo.http").is_err());
+        assert_eq!(with_http_extension("demo"), "demo.http");
+        assert_eq!(with_http_extension("demo.rest"), "demo.rest");
+    }
 }

@@ -31,6 +31,23 @@ function errText(err: unknown): string {
   return String(err);
 }
 
+/// 把 Record 中的 key 从 from 迁移到 to（用于文件重命名）
+function moveKey<T>(source: Record<string, T>, from: string, to: string): Record<string, T> {
+  if (!(from in source)) return source;
+  const next = { ...source };
+  next[to] = next[from];
+  delete next[from];
+  return next;
+}
+
+/// 删除 Record 中的 key（用于文件删除）
+function dropKey<T>(source: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in source)) return source;
+  const next = { ...source };
+  delete next[key];
+  return next;
+}
+
 function dropPaths<T>(
   map: Record<string, T>,
   drop: (path: string) => boolean
@@ -65,6 +82,12 @@ export default function App() {
   const [cookies, setCookies] = useState<CookieInfo[]>([]);
   const [proxyOpen, setProxyOpen] = useState(false);
   const [proxyInput, setProxyInput] = useState("");
+  const [fileDialog, setFileDialog] = useState<
+    | { kind: "create"; root: string; parent: string; value: string }
+    | { kind: "rename"; root: string; path: string; value: string }
+    | { kind: "delete"; root: string; path: string }
+    | null
+  >(null);
   const [cursorLine, setCursorLine] = useState(1);
   const [scrollTarget, setScrollTarget] = useState<{ line: number; nonce: number } | null>(
     null
@@ -322,6 +345,67 @@ export default function App() {
     },
     [openFileFromWorkspace]
   );
+
+  // 文件重命名后同步已打开的标签与缓冲区
+  const migrateOpenPath = (from: string, to: string) => {
+    setOpenFiles((prev) => prev.map((path) => (path === from ? to : path)));
+    setActivePath((prev) => (prev === from ? to : prev));
+    setContents((prev) => moveKey(prev, from, to));
+    setDirty((prev) => moveKey(prev, from, to));
+    setParsed((prev) => moveKey(prev, from, to));
+  };
+
+  // 文件删除后关闭对应标签
+  const closeOpenPath = (path: string) => {
+    const remaining = openFiles.filter((item) => item !== path);
+    setOpenFiles(remaining);
+    setActivePath((prev) =>
+      prev === path ? remaining[remaining.length - 1] ?? null : prev
+    );
+    setContents((prev) => dropKey(prev, path));
+    setDirty((prev) => dropKey(prev, path));
+    setParsed((prev) => dropKey(prev, path));
+  };
+
+  const submitFileDialog = async () => {
+    if (!fileDialog) return;
+    try {
+      if (fileDialog.kind === "create") {
+        const [info, path] = await api.createHttpFile(
+          fileDialog.root,
+          fileDialog.parent,
+          fileDialog.value
+        );
+        upsertWorkspace(info);
+        setFileDialog(null);
+        await openFile({
+          name: basename(path),
+          path,
+          relPath: relOf(info.root, path),
+          isDir: false,
+          children: [],
+        });
+        return;
+      }
+      if (fileDialog.kind === "rename") {
+        const [info, path] = await api.renameHttpFile(
+          fileDialog.root,
+          fileDialog.path,
+          fileDialog.value
+        );
+        upsertWorkspace(info);
+        setFileDialog(null);
+        migrateOpenPath(fileDialog.path, path);
+        return;
+      }
+      const info = await api.deleteHttpFile(fileDialog.root, fileDialog.path);
+      upsertWorkspace(info);
+      setFileDialog(null);
+      closeOpenPath(fileDialog.path);
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  };
 
   useEffect(() => {
     if (!activePath) return;
@@ -780,6 +864,15 @@ export default function App() {
           onOpenRequest={openRequestFromTree}
           onTogglePin={(root, node, pinned) => void togglePin(root, node, pinned)}
           onRunFolder={(root, node) => void runFolder(root, node)}
+          onCreateFile={(root, parent) =>
+            setFileDialog({ kind: "create", root, parent, value: "" })
+          }
+          onRenameFile={(root, node) =>
+            setFileDialog({ kind: "rename", root, path: node.path, value: node.name })
+          }
+          onDeleteFile={(root, node) =>
+            setFileDialog({ kind: "delete", root, path: node.path })
+          }
         />
 
         <main className="main">
@@ -1123,6 +1216,67 @@ export default function App() {
               </button>
               <button className="primary-button compact" onClick={() => void saveProxy()}>
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {fileDialog && (
+        <div className="modal-backdrop" onClick={() => setFileDialog(null)}>
+          <div className="modal modal-narrow" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <h2>
+                {fileDialog.kind === "create"
+                  ? "新建 .http 文件"
+                  : fileDialog.kind === "rename"
+                    ? "重命名文件"
+                    : "删除文件"}
+              </h2>
+              <button className="icon-button" onClick={() => setFileDialog(null)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {fileDialog.kind === "delete" ? (
+                <p className="modal-hint">
+                  确定删除「{basename(fileDialog.path)}」？该操作会直接从磁盘删除文件。
+                </p>
+              ) : (
+                <>
+                  <p className="modal-hint">
+                    {fileDialog.kind === "create"
+                      ? "未写扩展名时自动补 .http。"
+                      : "未写扩展名时保留原扩展名。"}
+                  </p>
+                  <input
+                    className="modal-input"
+                    autoFocus
+                    placeholder="demo.http"
+                    value={fileDialog.value}
+                    onChange={(event) =>
+                      setFileDialog({ ...fileDialog, value: event.target.value })
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void submitFileDialog();
+                    }}
+                  />
+                </>
+              )}
+            </div>
+            <div className="modal-foot">
+              <button className="secondary-button" onClick={() => setFileDialog(null)}>
+                取消
+              </button>
+              <button
+                className={
+                  fileDialog.kind === "delete"
+                    ? "primary-button compact danger"
+                    : "primary-button compact"
+                }
+                onClick={() => void submitFileDialog()}
+              >
+                {fileDialog.kind === "delete" ? "删除" : "确定"}
               </button>
             </div>
           </div>
