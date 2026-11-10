@@ -1105,15 +1105,6 @@ body.v-drag {
   border-bottom-color: var(--accent);
 }
 
-.raw-toggle {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10px;
-  color: var(--muted-2);
-}
-
 .tabs-actions {
   margin-left: auto;
   display: flex;
@@ -1121,8 +1112,103 @@ body.v-drag {
   gap: 10px;
 }
 
-.tabs-actions .raw-toggle {
-  margin-left: 0;
+.view-toggle {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.view-toggle button {
+  border: none !important;
+  border-radius: 0 !important;
+  padding: 2px 8px !important;
+  font-size: 11px !important;
+  color: var(--muted) !important;
+  background: transparent;
+}
+
+.view-toggle button.active {
+  background: var(--accent-soft);
+  color: var(--accent) !important;
+}
+
+.body-search {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 8px;
+  outline: none;
+  width: 140px;
+}
+
+.body-search:focus {
+  border-color: var(--accent);
+}
+
+.code-block mark {
+  background: rgba(232, 184, 63, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+
+/* ---------- json tree ---------- */
+.json-tree {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 12px 14px;
+}
+
+.json-row {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.json-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.json-toggle:hover {
+  background: var(--panel-2);
+}
+
+.json-arrow {
+  display: inline-block;
+  width: 14px;
+  color: var(--muted-2);
+}
+
+.json-key {
+  color: var(--blue, #61afef);
+}
+
+.json-string {
+  color: var(--green);
+}
+
+.json-number {
+  color: var(--orange, #d19a66);
+}
+
+.json-bool {
+  color: var(--purple, #c678dd);
+}
+
+.json-null {
+  color: var(--muted);
+}
+
+.json-bracket {
+  color: var(--muted);
+}
+
+.json-preview {
+  color: var(--muted-2);
 }
 
 .copy-button {
@@ -1144,10 +1230,6 @@ body.v-drag {
 .copy-button.copied {
   color: var(--green) !important;
   border-color: var(--green) !important;
-}
-
-.raw-toggle input {
-  accent-color: var(--accent);
 }
 
 .response-content {

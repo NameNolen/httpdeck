@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type { RequestResult } from "../api";
+import { JsonTree } from "./JsonTree";
 
 interface Props {
   results: RequestResult[];
@@ -36,18 +37,60 @@ function formatSize(bytes: number): string {
 
 function prettyBody(result: RequestResult): string {
   if (result.bodyIsBinary) return result.body;
+  const parsed = parseJsonBody(result);
+  if (parsed !== undefined) {
+    return JSON.stringify(parsed, null, 2);
+  }
+  return result.body;
+}
+
+function parseJsonBody(result: RequestResult): unknown {
+  if (result.bodyIsBinary) return undefined;
   const mime = (result.mimeType ?? "").toLowerCase();
   const trimmed = result.body.trim();
   const looksJson =
     mime.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[");
-  if (looksJson) {
-    try {
-      return JSON.stringify(JSON.parse(result.body), null, 2);
-    } catch {
-      return result.body;
-    }
+  if (!looksJson) return undefined;
+  try {
+    return JSON.parse(result.body);
+  } catch {
+    return undefined;
   }
-  return result.body;
+}
+
+function escapeShell(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+export function toCurlCommand(result: RequestResult): string {
+  const lines = [`curl -X ${result.method} ${escapeShell(result.url)}`];
+  for (const header of result.requestHeaders) {
+    lines.push(`-H ${escapeShell(`${header.name}: ${header.value}`)}`);
+  }
+  if (result.requestBody) {
+    lines.push(`--data ${escapeShell(result.requestBody)}`);
+  }
+  return lines.join(" \\\n  ");
+}
+
+function highlightText(text: string, query: string): ReactNode {
+  if (!query) return text;
+  const lower = text.toLowerCase();
+  const needle = query.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let key = 0;
+  for (;;) {
+    const found = lower.indexOf(needle, cursor);
+    if (found < 0) {
+      parts.push(text.slice(cursor));
+      break;
+    }
+    if (found > cursor) parts.push(text.slice(cursor, found));
+    parts.push(<mark key={key++}>{text.slice(found, found + needle.length)}</mark>);
+    cursor = found + needle.length;
+  }
+  return parts;
 }
 
 function tabText(result: RequestResult, tab: Tab, raw: boolean): string {
@@ -107,16 +150,22 @@ export function ResponsePanel({
   height,
 }: Props) {
   const [tab, setTab] = useState<Tab>("body");
-  const [raw, setRaw] = useState(false);
+  const [view, setView] = useState<"pretty" | "tree" | "raw">("pretty");
+  const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
   const result = results[selectedIndex];
   const panelStyle = height
     ? { flexGrow: 0, flexShrink: 0, flexBasis: `${height}px` }
     : undefined;
+  const jsonData = useMemo(
+    () => (result ? parseJsonBody(result) : undefined),
+    [result]
+  );
 
   useEffect(() => {
     setTab("body");
-    setRaw(false);
+    setView("pretty");
+    setQuery("");
   }, [selectedIndex, results.length]);
 
   useEffect(() => {
@@ -125,7 +174,14 @@ export function ResponsePanel({
 
   const copyCurrent = async () => {
     if (!result) return;
-    await writeClipboard(tabText(result, tab, raw));
+    await writeClipboard(tabText(result, tab, view === "raw"));
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  const copyCurl = async () => {
+    if (!result) return;
+    await writeClipboard(toCurlCommand(result));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };
@@ -219,11 +275,46 @@ export function ResponsePanel({
         </button>
         <div className="tabs-actions">
           {tab === "body" && !result.bodyIsBinary && (
-            <label className="raw-toggle">
-              <input type="checkbox" checked={raw} onChange={(e) => setRaw(e.target.checked)} />
-              原始
-            </label>
+            <>
+              <div className="view-toggle">
+                <button
+                  className={view === "pretty" ? "active" : ""}
+                  onClick={() => setView("pretty")}
+                >
+                  美化
+                </button>
+                {jsonData !== undefined && (
+                  <button
+                    className={view === "tree" ? "active" : ""}
+                    onClick={() => setView("tree")}
+                  >
+                    树形
+                  </button>
+                )}
+                <button
+                  className={view === "raw" ? "active" : ""}
+                  onClick={() => setView("raw")}
+                >
+                  原始
+                </button>
+              </div>
+              {view !== "tree" && (
+                <input
+                  className="body-search"
+                  placeholder="搜索响应…"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              )}
+            </>
           )}
+          <button
+            className="copy-button"
+            onClick={() => void copyCurl()}
+            title="复制为 cURL 命令"
+          >
+            cURL
+          </button>
           <button
             className={`copy-button ${copied ? "copied" : ""}`}
             onClick={() => void copyCurrent()}
@@ -252,7 +343,16 @@ export function ResponsePanel({
             {result.bodyIsBinary && (
               <div className="banner info">二进制响应，以下内容为 Base64 编码</div>
             )}
-            <pre className="code-block">{raw ? result.body : prettyBody(result)}</pre>
+            {view === "tree" && jsonData !== undefined ? (
+              <JsonTree data={jsonData} />
+            ) : (
+              <pre className="code-block">
+                {highlightText(
+                  view === "raw" ? result.body : prettyBody(result),
+                  query
+                )}
+              </pre>
+            )}
           </>
         )}
 
