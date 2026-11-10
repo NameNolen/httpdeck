@@ -116,6 +116,8 @@ export const api = {
     invoke<WorkspaceInfo>("set_proxy", { workspace, proxy }),
   getGlobals: (workspace: string) => invoke<KeyValue[]>("get_globals", { workspace }),
   clearGlobals: (workspace: string) => invoke<void>("clear_globals", { workspace }),
+  listVariables: (workspace: string, file: string, env: string | null) =>
+    invoke<KeyValue[]>("list_variables", { workspace, file, env }),
   runRequest: (workspace: string, file: string, index: number, env: string | null) =>
     invoke<RequestResult>("run_request", { workspace, file, index, env }),
   runFile: (workspace: string, file: string, env: string | null) =>

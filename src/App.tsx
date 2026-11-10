@@ -57,6 +57,7 @@ export default function App() {
   );
   const [globalsOpen, setGlobalsOpen] = useState(false);
   const [globals, setGlobals] = useState<KeyValue[]>([]);
+  const [envVars, setEnvVars] = useState<KeyValue[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
@@ -229,6 +230,26 @@ export default function App() {
       setGlobals([]);
     }
   }, [workspace]);
+
+  // 编辑器补全用的环境变量（按当前文件目录层级解析）
+  useEffect(() => {
+    if (!workspace || !activePath) {
+      setEnvVars([]);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .listVariables(workspace.root, activePath, workspace.selectedEnv)
+      .then((vars) => {
+        if (!cancelled) setEnvVars(vars);
+      })
+      .catch(() => {
+        if (!cancelled) setEnvVars([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace, activePath]);
 
   const refreshHistory = useCallback(async () => {
     if (!workspace) return;
@@ -630,6 +651,12 @@ export default function App() {
   }, [workspace, refreshGlobals]);
 
   const activeContent = activePath ? contents[activePath] ?? "" : "";
+  const completionVariables = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of envVars) map.set(item.name, item.value);
+    for (const item of globals) map.set(item.name, item.value);
+    return [...map.entries()].map(([name, value]) => ({ name, value }));
+  }, [envVars, globals]);
   const issues = activeParsed?.issues ?? [];
   const runLines = useMemo(
     () => (activeParsed?.requests ?? []).map((request) => request.line),
@@ -890,6 +917,8 @@ export default function App() {
                   onCursorLine={setCursorLine}
                   runLines={runLines}
                   onRunLine={runByLine}
+                  variables={completionVariables}
+                  onVariableHint={(message) => setNotice({ kind: "info", message })}
                 />
               </div>
 

@@ -293,6 +293,23 @@ fn clear_globals(state: State<'_, AppState>, workspace: String) -> Result<(), St
     Ok(())
 }
 
+/// 列出指定文件目录层级下当前环境生效的变量，用于编辑器补全。
+#[tauri::command]
+fn list_variables(
+    workspace: String,
+    file: String,
+    env: Option<String>,
+) -> Result<Vec<KeyValue>, String> {
+    let root = canonical_root(&workspace)?;
+    let env_name = resolve_env(&root, env);
+    let mut list: Vec<KeyValue> = env_vars_for(&root, &file_dir(&file), env_name.as_deref())
+        .into_iter()
+        .map(|(name, value)| KeyValue { name, value })
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(list)
+}
+
 fn env_vars_for(root: &Path, dir: &Path, env: Option<&str>) -> HashMap<String, String> {
     // .env 作为基础层，具名环境变量覆盖其上
     let mut vars = envfile::load_dotenv_chain(root, dir);
@@ -510,6 +527,7 @@ pub fn run() {
             set_proxy,
             get_globals,
             clear_globals,
+            list_variables,
             run_request,
             run_file,
             run_folder,

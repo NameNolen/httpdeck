@@ -10,6 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.18.4",
     "@codemirror/commands": "^6.7.1",
     "@codemirror/language": "^6.10.8",
     "@codemirror/search": "^6.5.8",
