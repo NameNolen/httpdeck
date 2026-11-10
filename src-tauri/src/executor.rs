@@ -9,8 +9,37 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, Url};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+/// 一次运行的取消令牌：取消时会唤醒正在等待的 HTTP 请求。
+pub struct CancelToken {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl CancelToken {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancelled: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
 
 pub async fn execute_request(
     def: &RequestDef,
@@ -19,7 +48,20 @@ pub async fn execute_request(
     globals: &mut HashMap<String, String>,
     jar: Arc<Jar>,
     base_dir: &Path,
+    cancel: Option<Arc<CancelToken>>,
 ) -> RequestResult {
+    if cancel.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+        return simple_failure(
+            def,
+            &def.url,
+            &[],
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            "请求已取消".to_string(),
+        );
+    }
     let empty_vars = HashMap::new();
     let pre_ctx = VariableContext {
         file_vars,
@@ -262,7 +304,27 @@ pub async fn execute_request(
     }
 
     let started = Instant::now();
-    let response = match request.send().await {
+    let send_result = match &cancel {
+        Some(token) => {
+            tokio::select! {
+                _ = token.notified() => {
+                    return simple_failure(
+                        def,
+                        &url,
+                        &resolved_headers,
+                        body_preview,
+                        tests,
+                        logs,
+                        script_error,
+                        "请求已取消".to_string(),
+                    );
+                }
+                result = request.send() => result,
+            }
+        }
+        None => request.send().await,
+    };
+    let response = match send_result {
         Ok(response) => response,
         Err(err) => {
             return simple_failure(
@@ -298,7 +360,27 @@ pub async fn execute_request(
         })
         .collect();
     let (mime_type, charset) = parse_content_type(&response_headers);
-    let response_bytes = match response.bytes().await {
+    let bytes_result = match &cancel {
+        Some(token) => {
+            tokio::select! {
+                _ = token.notified() => {
+                    return simple_failure(
+                        def,
+                        &url,
+                        &resolved_headers,
+                        body_preview,
+                        tests,
+                        logs,
+                        script_error,
+                        "请求已取消".to_string(),
+                    );
+                }
+                result = response.bytes() => result,
+            }
+        }
+        None => response.bytes().await,
+    };
+    let response_bytes = match bytes_result {
         Ok(bytes) => bytes,
         Err(err) => {
             return simple_failure(
@@ -666,6 +748,7 @@ client.global.set("saved", response.body.name);
             &mut globals,
             Arc::new(Jar::default()),
             Path::new("."),
+            None,
         )
         .await;
 
@@ -676,5 +759,58 @@ client.global.set("saved", response.body.name);
         assert!(result.tests[0].passed);
         assert_eq!(result.mime_type.as_deref(), Some("application/json"));
         assert_eq!(globals.get("saved").map(String::as_str), Some("test"));
+    }
+
+    #[tokio::test]
+    async fn cancels_inflight_request() {
+        use tokio::net::TcpListener;
+
+        // 服务端接受连接后保持沉默，模拟长时间无响应的请求
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let def = RequestDef {
+            index: 0,
+            name: None,
+            method: "GET".to_string(),
+            url: format!("http://{addr}/slow"),
+            headers: Vec::new(),
+            body: BodySpec::None,
+            pre_scripts: Vec::new(),
+            post_scripts: Vec::new(),
+            save_response: None,
+            options: Default::default(),
+            line: 1,
+        };
+
+        let token = CancelToken::new();
+        let canceller = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            canceller.cancel();
+        });
+
+        let mut globals = HashMap::new();
+        let result = execute_request(
+            &def,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut globals,
+            Arc::new(Jar::default()),
+            Path::new("."),
+            Some(token),
+        )
+        .await;
+
+        assert_eq!(result.status, 0);
+        assert_eq!(result.error.as_deref(), Some("请求已取消"));
     }
 }

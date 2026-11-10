@@ -7,6 +7,7 @@ interface Props {
   label: string;
   running: boolean;
   onSelect: (index: number) => void;
+  onCancel: () => void;
 }
 
 type Tab = "body" | "headers" | "tests" | "console" | "request";
@@ -101,6 +102,7 @@ export function ResponsePanel({
   label,
   running,
   onSelect,
+  onCancel,
 }: Props) {
   const [tab, setTab] = useState<Tab>("body");
   const [raw, setRaw] = useState(false);
@@ -129,6 +131,9 @@ export function ResponsePanel({
         <div className="response-empty">
           <div className="spinner" />
           <div>正在发送请求…</div>
+          <button className="secondary-button" onClick={onCancel}>
+            取消请求
+          </button>
         </div>
       </section>
     );

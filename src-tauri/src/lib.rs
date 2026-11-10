@@ -25,6 +25,30 @@ pub struct WorkspaceRuntime {
 pub struct AppState {
     workspaces: Mutex<HashMap<String, WorkspaceRuntime>>,
     run_lock: tokio::sync::Mutex<()>,
+    cancel_token: Mutex<Option<Arc<executor::CancelToken>>>,
+}
+
+fn install_cancel_token(state: &AppState) -> Arc<executor::CancelToken> {
+    let token = executor::CancelToken::new();
+    if let Ok(mut guard) = state.cancel_token.lock() {
+        *guard = Some(token.clone());
+    }
+    token
+}
+
+fn clear_cancel_token(state: &AppState) {
+    if let Ok(mut guard) = state.cancel_token.lock() {
+        *guard = None;
+    }
+}
+
+#[tauri::command]
+fn cancel_run(state: State<'_, AppState>) {
+    if let Ok(guard) = state.cancel_token.lock() {
+        if let Some(token) = guard.as_ref() {
+            token.cancel();
+        }
+    }
 }
 
 fn canonical_root(path: &str) -> Result<PathBuf, String> {
@@ -268,6 +292,7 @@ async fn run_request(
     let env_name = resolve_env(&root, env);
     let env_vars = env_vars_for(&root, env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
+    let token = install_cancel_token(&state);
     let result = executor::execute_request(
         def,
         &file_vars,
@@ -275,8 +300,10 @@ async fn run_request(
         &mut globals,
         jar,
         &file_dir(&file),
+        Some(token),
     )
     .await;
+    clear_cancel_token(&state);
     store_globals(&state, &root, globals);
     Ok(result)
 }
@@ -296,14 +323,19 @@ async fn run_file(
     let env_vars = env_vars_for(&root, env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let dir = file_dir(&file);
+    let token = install_cancel_token(&state);
     let mut results = Vec::new();
     for def in &parsed.requests {
+        if token.is_cancelled() {
+            break;
+        }
         let result = executor::execute_request(
-            def, &file_vars, &env_vars, &mut globals, jar.clone(), &dir,
+            def, &file_vars, &env_vars, &mut globals, jar.clone(), &dir, Some(token.clone()),
         )
         .await;
         results.push(result);
     }
+    clear_cancel_token(&state);
     store_globals(&state, &root, globals);
     Ok(results)
 }
@@ -321,8 +353,12 @@ async fn run_folder(
     let env_name = resolve_env(&root, env);
     let env_vars = env_vars_for(&root, env_name.as_deref());
     let files = workspace::collect_http_files(Path::new(&folder));
+    let token = install_cancel_token(&state);
     let mut output = Vec::new();
     for path in files {
+        if token.is_cancelled() {
+            break;
+        }
         let file_string = path.to_string_lossy().to_string();
         let name = path
             .file_name()
@@ -334,6 +370,9 @@ async fn run_folder(
                 let dir = file_dir(&file_string);
                 let mut results = Vec::new();
                 for def in &parsed.requests {
+                    if token.is_cancelled() {
+                        break;
+                    }
                     let result = executor::execute_request(
                         def,
                         &file_vars,
@@ -341,6 +380,7 @@ async fn run_folder(
                         &mut globals,
                         jar.clone(),
                         &dir,
+                        Some(token.clone()),
                     )
                     .await;
                     results.push(result);
@@ -360,6 +400,7 @@ async fn run_folder(
             }),
         }
     }
+    clear_cancel_token(&state);
     store_globals(&state, &root, globals);
     Ok(output)
 }
@@ -385,7 +426,8 @@ pub fn run() {
             clear_globals,
             run_request,
             run_file,
-            run_folder
+            run_folder,
+            cancel_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running HttpDeck");

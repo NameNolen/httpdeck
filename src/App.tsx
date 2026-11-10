@@ -705,6 +705,7 @@ export default function App() {
                 label={runLabel}
                 running={running}
                 onSelect={setResultIndex}
+                onCancel={() => void api.cancelRun()}
               />
             </>
           )}

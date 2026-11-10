@@ -99,4 +99,5 @@ export const api = {
     invoke<RequestResult[]>("run_file", { workspace, file, env }),
   runFolder: (workspace: string, folder: string, env: string | null) =>
     invoke<FileRunResult[]>("run_folder", { workspace, folder, env }),
+  cancelRun: () => invoke<void>("cancel_run"),
 };
