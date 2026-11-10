@@ -127,4 +127,5 @@ export const api = {
   clearHistory: (workspace: string) => invoke<void>("clear_history", { workspace }),
   listCookies: (workspace: string) => invoke<CookieInfo[]>("list_cookies", { workspace }),
   clearCookies: (workspace: string) => invoke<void>("clear_cookies", { workspace }),
+  revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
 };

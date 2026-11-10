@@ -19,6 +19,7 @@ interface Props {
 
 type MenuState =
   | { kind: "workspace"; root: string; name: string; x: number; y: number }
+  | { kind: "folder"; root: string; node: FileNode; x: number; y: number }
   | {
       kind: "file";
       root: string;
@@ -123,6 +124,17 @@ export function Sidebar({
             className="tree-row dir"
             style={{ paddingLeft: 10 + depth * 14 }}
             onClick={() => toggleDir(node.path)}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setMenu({
+                kind: "folder",
+                root: workspace.root,
+                node,
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
             title={node.path}
           >
             <span className={`chevron ${isCollapsed ? "collapsed" : ""}`}>▸</span>
@@ -353,21 +365,54 @@ export function Sidebar({
           onClick={(event) => event.stopPropagation()}
         >
           {menu.kind === "workspace" ? (
-            <button
-              className="danger"
-              onClick={() => {
-                const target = menu;
-                setMenu(null);
-                onRemoveWorkspace(target.root);
-              }}
-            >
-              移除目录「{menu.name}」
-            </button>
-          ) : (
             <>
               <button
                 onClick={() => {
                   const target = menu;
+                  setMenu(null);
+                  void api.revealInExplorer(target.root);
+                }}
+              >
+                在资源管理器中打开
+              </button>
+              <button
+                className="danger"
+                onClick={() => {
+                  const target = menu;
+                  setMenu(null);
+                  onRemoveWorkspace(target.root);
+                }}
+              >
+                移除目录「{menu.name}」
+              </button>
+            </>
+          ) : menu.kind === "folder" ? (
+            <>
+              <button
+                disabled={running}
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "folder" }>;
+                  setMenu(null);
+                  onRunFolder(target.root, target.node);
+                }}
+              >
+                运行该目录
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "folder" }>;
+                  setMenu(null);
+                  void api.revealInExplorer(target.node.path);
+                }}
+              >
+                在资源管理器中打开
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
                   setMenu(null);
                   void toggleFile(target.node);
                 }}
@@ -376,12 +421,21 @@ export function Sidebar({
               </button>
               <button
                 onClick={() => {
-                  const target = menu;
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
                   setMenu(null);
                   onTogglePin(target.root, target.node, !target.pinned);
                 }}
               >
                 {menu.pinned ? "取消置顶" : "置顶文件"}
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
+                  setMenu(null);
+                  void api.revealInExplorer(target.node.path);
+                }}
+              >
+                在资源管理器中打开
               </button>
             </>
           )}

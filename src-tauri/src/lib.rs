@@ -55,6 +55,26 @@ fn cancel_run(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!("路径不存在: {path}"));
+    }
+    // Windows: /select 定位文件，目录直接打开
+    let status = if target.is_dir() {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .status()
+    } else {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{path}"))
+            .status()
+    };
+    status.map_err(|e| format!("打开资源管理器失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn list_history(workspace: String) -> Result<Vec<HistoryEntry>, String> {
     let root = canonical_root(&workspace)?;
     Ok(history::list(&root))
@@ -497,7 +517,8 @@ pub fn run() {
             list_history,
             clear_history,
             list_cookies,
-            clear_cookies
+            clear_cookies,
+            reveal_in_explorer
         ])
         .run(tauri::generate_context!())
         .expect("error while running HttpDeck");
