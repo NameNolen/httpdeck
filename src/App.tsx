@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   api,
   type FileNode,
+  type HistoryEntry,
   type KeyValue,
   type ParsedFile,
   type RequestResult,
@@ -55,6 +56,9 @@ export default function App() {
   );
   const [globalsOpen, setGlobalsOpen] = useState(false);
   const [globals, setGlobals] = useState<KeyValue[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyQuery, setHistoryQuery] = useState("");
   const [cursorLine, setCursorLine] = useState(1);
   const [scrollTarget, setScrollTarget] = useState<{ line: number; nonce: number } | null>(
     null
@@ -221,6 +225,20 @@ export default function App() {
     }
   }, [workspace]);
 
+  const refreshHistory = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      setHistory(await api.listHistory(workspace.root));
+    } catch {
+      setHistory([]);
+    }
+  }, [workspace]);
+
+  useEffect(() => {
+    void refreshHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace?.root]);
+
   useEffect(() => {
     void refreshGlobals();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -357,13 +375,14 @@ export default function App() {
         setResultIndex(0);
         setRunLabel(result.name);
         void refreshGlobals();
+        void refreshHistory();
       } catch (err) {
         setNotice({ kind: "error", message: errText(err) });
       } finally {
         setRunning(false);
       }
     },
-    [rootOf, activePath, env, dirty, saveFile, refreshGlobals]
+    [rootOf, activePath, env, dirty, saveFile, refreshGlobals, refreshHistory]
   );
 
   const runWholeFile = useCallback(async () => {
@@ -381,12 +400,13 @@ export default function App() {
         setNotice({ kind: "info", message: "该文件没有可运行的请求" });
       }
       void refreshGlobals();
+      void refreshHistory();
     } catch (err) {
       setNotice({ kind: "error", message: errText(err) });
     } finally {
       setRunning(false);
     }
-  }, [rootOf, activePath, env, dirty, saveFile, refreshGlobals]);
+  }, [rootOf, activePath, env, dirty, saveFile, refreshGlobals, refreshHistory]);
 
   const runFolder = useCallback(
     async (root: string, node: FileNode) => {
@@ -410,14 +430,17 @@ export default function App() {
         } else if (flat.length === 0) {
           setNotice({ kind: "info", message: "该目录下没有可运行的请求" });
         }
-        if (root === activeRoot) void refreshGlobals();
+        if (root === activeRoot) {
+          void refreshGlobals();
+          void refreshHistory();
+        }
       } catch (err) {
         setNotice({ kind: "error", message: errText(err) });
       } finally {
         setRunning(false);
       }
     },
-    [workspaces, activeRoot, saveAllDirty, refreshGlobals]
+    [workspaces, activeRoot, saveAllDirty, refreshGlobals, refreshHistory]
   );
 
   const togglePin = useCallback(
@@ -479,6 +502,76 @@ export default function App() {
     setGlobalsOpen(true);
     await refreshGlobals();
   }, [refreshGlobals]);
+
+  // 历史记录：打开面板、清空、按条目重发
+  const openHistory = useCallback(async () => {
+    setHistoryOpen(true);
+    setHistoryQuery("");
+    await refreshHistory();
+  }, [refreshHistory]);
+
+  const clearHistory = useCallback(async () => {
+    if (!workspace) return;
+    try {
+      await api.clearHistory(workspace.root);
+      setHistory([]);
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  }, [workspace]);
+
+  const rerunHistory = useCallback(
+    async (entry: HistoryEntry) => {
+      const root = rootOf(entry.file);
+      if (!root) {
+        setNotice({ kind: "error", message: `文件不在当前工作区中: ${entry.file}` });
+        return;
+      }
+      const owner = workspaces.find((item) => item.root === root);
+      setHistoryOpen(false);
+      // 同时打开来源文件，便于查看上下文
+      void openFile({
+        name: basename(entry.file),
+        path: entry.file,
+        relPath: "",
+        isDir: false,
+        children: [],
+      });
+      try {
+        setRunning(true);
+        setNotice(null);
+        const result = await api.runRequest(
+          root,
+          entry.file,
+          entry.requestIndex,
+          owner?.selectedEnv ?? null
+        );
+        setResults([result]);
+        setResultIndex(0);
+        setRunLabel(`重发 · ${entry.name}`);
+        if (root === activeRoot) {
+          void refreshGlobals();
+          void refreshHistory();
+        }
+      } catch (err) {
+        setNotice({ kind: "error", message: errText(err) });
+      } finally {
+        setRunning(false);
+      }
+    },
+    [rootOf, workspaces, activeRoot, openFile, refreshGlobals, refreshHistory]
+  );
+
+  const filteredHistory = useMemo(() => {
+    const query = historyQuery.trim().toLowerCase();
+    if (!query) return history;
+    return history.filter((entry) =>
+      [entry.name, entry.method, entry.url, entry.file]
+        .join("\n")
+        .toLowerCase()
+        .includes(query)
+    );
+  }, [history, historyQuery]);
 
   const clearGlobals = useCallback(async () => {
     if (!workspace) return;
@@ -553,6 +646,14 @@ export default function App() {
             title="查看 client.global 变量"
           >
             变量 <span className="count">{globals.length}</span>
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => void openHistory()}
+            disabled={!workspace}
+            title="请求历史记录"
+          >
+            历史 <span className="count">{history.length}</span>
           </button>
           <button
             className="ghost-button"
@@ -778,6 +879,71 @@ export default function App() {
                 清空变量
               </button>
               <button className="primary-button compact" onClick={() => setGlobalsOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {historyOpen && (
+        <div className="modal-backdrop" onClick={() => setHistoryOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <h2>请求历史</h2>
+              <button className="icon-button" onClick={() => setHistoryOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="history-search">
+              <input
+                autoFocus
+                placeholder="搜索名称 / 方法 / URL / 文件…"
+                value={historyQuery}
+                onChange={(event) => setHistoryQuery(event.target.value)}
+              />
+            </div>
+            <div className="modal-body history-body">
+              {filteredHistory.length === 0 ? (
+                <div className="kv-empty">
+                  {history.length === 0 ? "暂无历史记录" : "没有匹配的请求"}
+                </div>
+              ) : (
+                filteredHistory.map((entry, index) => (
+                  <div
+                    className="history-row"
+                    key={`${entry.time}-${index}`}
+                    onClick={() => void rerunHistory(entry)}
+                    title={`${entry.file}\n点击重发此请求`}
+                  >
+                    <span className={`mini-method ${entry.method.toLowerCase()}`}>
+                      {entry.method}
+                    </span>
+                    <span className="history-name">{entry.name}</span>
+                    <span className="history-url">{entry.url}</span>
+                    <span
+                      className={`mini-status ${
+                        entry.error ? "err" : entry.status >= 200 && entry.status < 300 ? "ok" : entry.status >= 300 && entry.status < 400 ? "warn" : "bad"
+                      }`}
+                    >
+                      {entry.error ? "ERR" : entry.status}
+                    </span>
+                    <span className="history-time">
+                      {new Date(entry.time).toLocaleString()}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="modal-foot">
+              <button
+                className="secondary-button"
+                onClick={() => void clearHistory()}
+                disabled={history.length === 0}
+              >
+                清空历史
+              </button>
+              <button className="primary-button compact" onClick={() => setHistoryOpen(false)}>
                 关闭
               </button>
             </div>

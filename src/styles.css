@@ -1534,3 +1534,68 @@ body.v-drag {
   padding: 12px 16px;
   border-top: 1px solid var(--border);
 }
+
+/* ---------- history ---------- */
+.history-search {
+  padding: 10px 16px 0;
+}
+
+.history-search input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  outline: none;
+}
+
+.history-search input:focus {
+  border-color: var(--accent);
+}
+
+.history-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.history-row:hover {
+  background: var(--panel-2);
+}
+
+.history-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30%;
+}
+
+.history-url {
+  flex: 1;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-time {
+  color: var(--muted-2);
+  font-size: 11px;
+  white-space: nowrap;
+}

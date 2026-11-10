@@ -75,6 +75,18 @@ export interface FileRunResult {
   error: string | null;
 }
 
+export interface HistoryEntry {
+  time: string;
+  file: string;
+  requestIndex: number;
+  name: string;
+  method: string;
+  url: string;
+  status: number;
+  durationMs: number;
+  error: string | null;
+}
+
 export const api = {
   initialWorkspace: () => invoke<string | null>("initial_workspace"),
   recentWorkspaces: () => invoke<string[]>("recent_workspaces"),
@@ -100,4 +112,6 @@ export const api = {
   runFolder: (workspace: string, folder: string, env: string | null) =>
     invoke<FileRunResult[]>("run_folder", { workspace, folder, env }),
   cancelRun: () => invoke<void>("cancel_run"),
+  listHistory: (workspace: string) => invoke<HistoryEntry[]>("list_history", { workspace }),
+  clearHistory: (workspace: string) => invoke<void>("clear_history", { workspace }),
 };

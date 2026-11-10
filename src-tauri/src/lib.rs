@@ -1,5 +1,6 @@
 mod envfile;
 mod executor;
+mod history;
 mod models;
 mod parser;
 mod recent;
@@ -8,7 +9,7 @@ mod variables;
 mod workspace;
 
 use models::{
-    FileRunResult, KeyValue, ParsedFileOutput, RequestResult, WorkspaceInfo,
+    FileRunResult, HistoryEntry, KeyValue, ParsedFileOutput, RequestResult, WorkspaceInfo,
 };
 use reqwest::cookie::Jar;
 use std::collections::HashMap;
@@ -49,6 +50,19 @@ fn cancel_run(state: State<'_, AppState>) {
             token.cancel();
         }
     }
+}
+
+#[tauri::command]
+fn list_history(workspace: String) -> Result<Vec<HistoryEntry>, String> {
+    let root = canonical_root(&workspace)?;
+    Ok(history::list(&root))
+}
+
+#[tauri::command]
+fn clear_history(workspace: String) -> Result<(), String> {
+    let root = canonical_root(&workspace)?;
+    history::clear(&root);
+    Ok(())
 }
 
 fn canonical_root(path: &str) -> Result<PathBuf, String> {
@@ -305,6 +319,7 @@ async fn run_request(
     )
     .await;
     clear_cancel_token(&state);
+    history::record(&root, &file, &result);
     store_globals(&state, &root, globals);
     Ok(result)
 }
@@ -334,6 +349,7 @@ async fn run_file(
             def, &file_vars, &env_vars, &mut globals, jar.clone(), &dir, Some(token.clone()),
         )
         .await;
+        history::record(&root, &file, &result);
         results.push(result);
     }
     clear_cancel_token(&state);
@@ -385,6 +401,7 @@ async fn run_folder(
                         Some(token.clone()),
                     )
                     .await;
+                    history::record(&root, &file_string, &result);
                     results.push(result);
                 }
                 output.push(FileRunResult {
@@ -429,7 +446,9 @@ pub fn run() {
             run_request,
             run_file,
             run_folder,
-            cancel_run
+            cancel_run,
+            list_history,
+            clear_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running HttpDeck");

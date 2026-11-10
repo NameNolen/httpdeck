@@ -107,3 +107,17 @@ pub struct WorkspaceConfig {
     pub pinned: Vec<String>,
     pub selected_env: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub time: String,
+    pub file: String,
+    pub request_index: usize,
+    pub name: String,
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    pub duration_ms: u128,
+    pub error: Option<String>,
+}
