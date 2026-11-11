@@ -289,6 +289,10 @@ export function ResponsePanel({
     tab === "body" &&
     view !== "tree" &&
     displayText.length > VIRTUAL_LIMIT;
+  const isSse = (result.mimeType ?? "").toLowerCase().includes("text/event-stream");
+  const sseEvents = isSse
+    ? result.body.split("\n").filter((line) => line.trimStart().startsWith("data:")).length
+    : 0;
 
   return (
     <section className="response-panel" style={panelStyle}>
@@ -303,6 +307,14 @@ export function ResponsePanel({
           <span className="metric">{result.durationMs} ms</span>
           <span className="metric">{formatSize(result.size)}</span>
           {result.mimeType && <span className="metric mime">{result.mimeType}</span>}
+          {isSse && (
+            <span
+              className="metric flag"
+              title="Server-Sent Events 响应：显示的是连接关闭后收到的完整事件快照"
+            >
+              SSE 事件流 · {sseEvents} 个 data 事件
+            </span>
+          )}
           {result.timeoutMs != null && (
             <span className="metric flag" title="请求级超时（// @timeout）">
               超时 {formatTimeout(result.timeoutMs)}

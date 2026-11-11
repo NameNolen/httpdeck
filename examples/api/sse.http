@@ -1,0 +1,13 @@
+// Server-Sent Events 示例：响应 Content-Type 为 text/event-stream 时
+// 响应面板会显示事件数量提示（收到的是连接关闭后的完整事件快照）
+
+### SSE 测试流
+GET https://sse.dev/test
+Accept: text/event-stream
+
+> {%
+    client.test("SSE 返回 200", function () {
+        client.assert(response.status === 200, "期望 200，实际 " + response.status);
+    });
+    client.log("mimeType:", response.contentType.mimeType);
+%}
