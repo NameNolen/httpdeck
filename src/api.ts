@@ -70,6 +70,8 @@ export interface WorkspaceInfo {
   selectedEnv: string | null;
   globals: KeyValue[];
   proxy: string | null;
+  clientCert: string | null;
+  clientKey: string | null;
 }
 
 export interface FileRunResult {
@@ -129,6 +131,8 @@ export const api = {
     invoke<WorkspaceInfo>("set_env", { workspace, env }),
   setProxy: (workspace: string, proxy: string | null) =>
     invoke<WorkspaceInfo>("set_proxy", { workspace, proxy }),
+  setClientCert: (workspace: string, cert: string | null, key: string | null) =>
+    invoke<WorkspaceInfo>("set_client_cert", { workspace, cert, key }),
   getGlobals: (workspace: string) => invoke<KeyValue[]>("get_globals", { workspace }),
   clearGlobals: (workspace: string) => invoke<void>("clear_globals", { workspace }),
   listVariables: (workspace: string, file: string, env: string | null) =>

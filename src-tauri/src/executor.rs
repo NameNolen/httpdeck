@@ -57,6 +57,7 @@ pub async fn execute_request(
     base_dir: &Path,
     cancel: Option<Arc<CancelToken>>,
     proxy: Option<&str>,
+    identity: Option<reqwest::Identity>,
 ) -> RequestResult {
     if cancel.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
         return simple_failure(
@@ -309,6 +310,9 @@ pub async fn execute_request(
         .danger_accept_invalid_certs(def.options.accept_invalid_certs);
     if !def.options.no_cookie_jar {
         client_builder = client_builder.cookie_provider(cookies);
+    }
+    if let Some(identity) = identity {
+        client_builder = client_builder.identity(identity);
     }
     if let Some(proxy) = proxy.filter(|p| !p.trim().is_empty()) {
         match reqwest::Proxy::all(proxy.trim()) {
@@ -1038,6 +1042,7 @@ client.global.set("saved", response.body.name);
             Path::new("."),
             None,
             None,
+            None,
         )
         .await;
 
@@ -1101,6 +1106,7 @@ client.global.set("saved", response.body.name);
             Path::new("."),
             Some(token),
             None,
+            None,
         )
         .await;
 
@@ -1161,6 +1167,7 @@ client.global.set("saved", response.body.name);
             Path::new("."),
             None,
             None,
+            None,
         )
         .await;
         assert_eq!(ok.status, 200, "{:?}", ok.error);
@@ -1175,6 +1182,7 @@ client.global.set("saved", response.body.name);
             Path::new("."),
             None,
             Some(&format!("http://127.0.0.1:{free_port}")),
+            None,
         )
         .await;
         assert_eq!(failed.status, 0);
@@ -1229,6 +1237,7 @@ client.global.set("saved", response.body.name);
             &mut globals,
             Arc::new(SharedCookieStore::new()),
             Path::new("."),
+            None,
             None,
             None,
         )
@@ -1322,6 +1331,7 @@ Content-Type: text/plain\n\
             &mut globals,
             Arc::new(SharedCookieStore::new()),
             &dir,
+            None,
             None,
             None,
         )

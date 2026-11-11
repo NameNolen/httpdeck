@@ -207,6 +207,8 @@ fn build_workspace_info(state: &AppState, root: &Path) -> Result<WorkspaceInfo, 
         selected_env,
         globals: global_list,
         proxy: config.proxy.clone(),
+        client_cert: config.client_cert.clone(),
+        client_key: config.client_key.clone(),
     })
 }
 
@@ -453,6 +455,70 @@ fn set_proxy(
     build_workspace_info(&state, &root)
 }
 
+/// 保存 mTLS 客户端证书 / 私钥路径配置
+fn update_client_cert_config(
+    root: &Path,
+    cert: Option<String>,
+    key: Option<String>,
+) -> Result<(), String> {
+    let mut config = workspace::load_config(root);
+    config.client_cert = cert.filter(|value| !value.trim().is_empty());
+    config.client_key = key.filter(|value| !value.trim().is_empty());
+    workspace::save_config(root, &config)
+}
+
+#[tauri::command]
+fn set_client_cert(
+    state: State<'_, AppState>,
+    workspace: String,
+    cert: Option<String>,
+    key: Option<String>,
+) -> Result<WorkspaceInfo, String> {
+    let root = canonical_root(&workspace)?;
+    update_client_cert_config(&root, cert, key)?;
+    build_workspace_info(&state, &root)
+}
+
+/// 读取工作区配置的客户端证书，构建 reqwest Identity。
+/// 证书与私钥分开存放时拼接 PEM 字节；相对路径按工作区根目录解析。
+fn load_identity(root: &Path) -> Result<Option<reqwest::Identity>, String> {
+    let config = workspace::load_config(root);
+    let Some(cert) = config
+        .client_cert
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let resolve = |raw: &str| {
+        let path = Path::new(raw);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    let cert_path = resolve(cert);
+    let mut pem = std::fs::read(&cert_path)
+        .map_err(|e| format!("读取客户端证书失败 {}: {e}", cert_path.display()))?;
+    if let Some(key) = config
+        .client_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let key_path = resolve(key);
+        let key_bytes = std::fs::read(&key_path)
+            .map_err(|e| format!("读取客户端私钥失败 {}: {e}", key_path.display()))?;
+        pem.push(b'\n');
+        pem.extend_from_slice(&key_bytes);
+    }
+    reqwest::Identity::from_pem(&pem)
+        .map(Some)
+        .map_err(|e| format!("加载客户端证书失败: {e}"))
+}
+
 #[tauri::command]
 fn get_globals(state: State<'_, AppState>, workspace: String) -> Result<Vec<KeyValue>, String> {
     let root = canonical_root(&workspace)?;
@@ -540,7 +606,9 @@ async fn run_request(
     let env_vars = env_vars_for(&root, &file_dir(&file), env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
-    let proxy = workspace::load_config(&root).proxy;
+    let config = workspace::load_config(&root);
+    let proxy = config.proxy;
+    let identity = load_identity(&root)?;
     let result = executor::execute_request(
         def,
         &file_vars,
@@ -550,6 +618,7 @@ async fn run_request(
         &file_dir(&file),
         Some(token),
         proxy.as_deref(),
+        identity,
     )
     .await;
     clear_cancel_token(&state);
@@ -575,7 +644,9 @@ async fn run_file(
     let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
     let token = install_cancel_token(&state);
-    let proxy = workspace::load_config(&root).proxy;
+    let config = workspace::load_config(&root);
+    let proxy = config.proxy;
+    let identity = load_identity(&root)?;
     let mut results = Vec::new();
     for def in &parsed.requests {
         if token.is_cancelled() {
@@ -590,6 +661,7 @@ async fn run_file(
             &dir,
             Some(token.clone()),
             proxy.as_deref(),
+            identity.clone(),
         )
         .await;
         history::record(&root, &file, &result);
@@ -614,7 +686,9 @@ async fn run_folder(
     let env_name = resolve_env(&root, env);
     let files = workspace::collect_http_files(Path::new(&folder));
     let token = install_cancel_token(&state);
-    let proxy = workspace::load_config(&root).proxy;
+    let config = workspace::load_config(&root);
+    let proxy = config.proxy;
+    let identity = load_identity(&root)?;
     let mut output = Vec::new();
     for path in files {
         if token.is_cancelled() {
@@ -645,6 +719,7 @@ async fn run_folder(
                         &dir,
                         Some(token.clone()),
                         proxy.as_deref(),
+                        identity.clone(),
                     )
                     .await;
                     history::record(&root, &file_string, &result);
@@ -707,6 +782,7 @@ pub fn run() {
             set_pinned,
             set_env,
             set_proxy,
+            set_client_cert,
             get_globals,
             clear_globals,
             list_variables,
@@ -763,6 +839,41 @@ mod tests {
         let second = super::record_recent_file(workspace, file_path).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(Path::new(&second[0]), root.join("a.http"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn client_cert_config_persists_and_identity_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "httpdeck-mtls-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = std::fs::canonicalize(&dir).unwrap();
+
+        // 未配置时无 Identity
+        assert!(super::load_identity(&root).unwrap().is_none());
+
+        // 配置指向不存在的证书文件：先验证配置持久化，再验证加载报错
+        super::update_client_cert_config(&root, Some("missing.pem".to_string()), None).unwrap();
+        let config = super::workspace::load_config(&root);
+        assert_eq!(config.client_cert.as_deref(), Some("missing.pem"));
+        assert!(super::load_identity(&root).is_err());
+
+        // 证书文件存在但内容非法 → Identity 解析报错
+        std::fs::write(dir.join("client.pem"), "not a pem").unwrap();
+        super::update_client_cert_config(
+            &root,
+            Some("client.pem".to_string()),
+            Some("client.key".to_string()),
+        )
+        .unwrap();
+        assert!(super::load_identity(&root).is_err());
+
+        // 清空配置
+        super::update_client_cert_config(&root, None, None).unwrap();
+        assert!(super::load_identity(&root).unwrap().is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

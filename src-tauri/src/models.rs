@@ -106,6 +106,10 @@ pub struct WorkspaceInfo {
     pub selected_env: Option<String>,
     pub globals: Vec<KeyValue>,
     pub proxy: Option<String>,
+    /// 客户端证书 PEM 路径（相对路径按工作区根目录解析）
+    pub client_cert: Option<String>,
+    /// 客户端私钥 PEM 路径（相对路径按工作区根目录解析）
+    pub client_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +129,10 @@ pub struct WorkspaceConfig {
     pub selected_env: Option<String>,
     /// 工作区级代理，例如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
     pub proxy: Option<String>,
+    /// 客户端证书 PEM 路径（mTLS）
+    pub client_cert: Option<String>,
+    /// 客户端私钥 PEM 路径（mTLS，与证书分开存放时填写）
+    pub client_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

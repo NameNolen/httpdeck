@@ -106,7 +106,7 @@
 - [ ] gRPC
 - [ ] GraphQL 专用请求体
 - [ ] OAuth 2.0 / Digest / NTLM 认证助手
-- [ ] 客户端证书（mTLS）配置界面
+- [x] 客户端证书（mTLS）配置界面（网络设置弹窗，PEM 证书 / 私钥路径）
 - [ ] TypeScript 脚本（IntelliJ 本身也不支持，需额外内置转译器）
 - [ ] macOS / Linux 打包验证（Tauri 支持，但当前只验证 Windows）
 - [ ] 自动化端到端测试

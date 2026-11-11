@@ -83,6 +83,8 @@ export default function App() {
   const [cookies, setCookies] = useState<CookieInfo[]>([]);
   const [proxyOpen, setProxyOpen] = useState(false);
   const [proxyInput, setProxyInput] = useState("");
+  const [certInput, setCertInput] = useState("");
+  const [keyInput, setKeyInput] = useState("");
   const [fileDialog, setFileDialog] = useState<
     | { kind: "create"; root: string; parent: string; value: string }
     | { kind: "rename"; root: string; path: string; value: string }
@@ -761,25 +763,34 @@ export default function App() {
     }
   }, [workspace]);
 
-  // 代理设置：工作区级，空为不使用代理
+  // 网络设置：代理 + 客户端证书（mTLS），工作区级
   const openProxy = useCallback(() => {
     setProxyInput(workspace?.proxy ?? "");
+    setCertInput(workspace?.clientCert ?? "");
+    setKeyInput(workspace?.clientKey ?? "");
     setProxyOpen(true);
   }, [workspace]);
 
   const saveProxy = useCallback(async () => {
     if (!workspace) return;
     try {
-      upsertWorkspace(await api.setProxy(workspace.root, proxyInput.trim() || null));
+      const proxy = proxyInput.trim() || null;
+      const cert = certInput.trim() || null;
+      const key = keyInput.trim() || null;
+      upsertWorkspace(await api.setProxy(workspace.root, proxy));
+      upsertWorkspace(await api.setClientCert(workspace.root, cert, key));
       setProxyOpen(false);
       setNotice({
         kind: "info",
-        message: proxyInput.trim() ? `已设置代理 ${proxyInput.trim()}` : "已关闭代理",
+        message: [
+          proxy ? `已设置代理 ${proxy}` : "已关闭代理",
+          cert ? "已配置客户端证书" : "已清除客户端证书",
+        ].join("，"),
       });
     } catch (err) {
       setNotice({ kind: "error", message: errText(err) });
     }
-  }, [workspace, proxyInput, upsertWorkspace]);
+  }, [workspace, proxyInput, certInput, keyInput, upsertWorkspace]);
 
   const clearGlobals = useCallback(async () => {
     if (!workspace) return;
@@ -881,9 +892,9 @@ export default function App() {
             className="ghost-button"
             onClick={openProxy}
             disabled={!workspace}
-            title="代理设置（HTTP / SOCKS5）"
+            title="网络设置（代理 / 客户端证书）"
           >
-            代理{workspace?.proxy ? " ✓" : ""}
+            网络{workspace?.proxy || workspace?.clientCert ? " ✓" : ""}
           </button>
           <button
             className="ghost-button"
@@ -1250,7 +1261,7 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setProxyOpen(false)}>
           <div className="modal modal-narrow" onClick={(event) => event.stopPropagation()}>
             <div className="modal-head">
-              <h2>代理设置</h2>
+              <h2>网络设置</h2>
               <button className="icon-button" onClick={() => setProxyOpen(false)}>
                 ×
               </button>
@@ -1264,9 +1275,28 @@ export default function App() {
               <input
                 className="modal-input"
                 autoFocus
-                placeholder="http://127.0.0.1:7890"
+                placeholder="代理地址，如 http://127.0.0.1:7890"
                 value={proxyInput}
                 onChange={(event) => setProxyInput(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void saveProxy()}
+              />
+              <p className="modal-hint">
+                客户端证书（mTLS）：填写 PEM 证书与私钥路径，相对路径按工作区根目录解析；
+                若使用证书与私钥合并的 PEM 文件，私钥可留空。
+              </p>
+              <input
+                className="modal-input"
+                placeholder="客户端证书路径，如 ./certs/client.pem"
+                value={certInput}
+                onChange={(event) => setCertInput(event.target.value)}
+                onKeyDown={(event) => event.key === "Enter" && void saveProxy()}
+              />
+              <input
+                className="modal-input"
+                style={{ marginTop: 8 }}
+                placeholder="客户端私钥路径，如 ./certs/client.key"
+                value={keyInput}
+                onChange={(event) => setKeyInput(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && void saveProxy()}
               />
             </div>
