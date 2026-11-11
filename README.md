@@ -102,14 +102,14 @@
 ### 低优先级 / 暂不支持
 
 - [ ] WebSocket
-- [ ] Server-Sent Events
+- [x] Server-Sent Events（响应栏事件流提示与 data 事件计数）
 - [ ] gRPC
-- [ ] GraphQL 专用请求体
+- [x] GraphQL 专用请求体（`graphql { ... }` 块自动转 JSON 并补 Content-Type）
 - [ ] OAuth 2.0 / Digest / NTLM 认证助手
 - [x] 客户端证书（mTLS）配置界面（网络设置弹窗，PEM 证书 / 私钥路径）
 - [ ] TypeScript 脚本（IntelliJ 本身也不支持，需额外内置转译器）
 - [ ] macOS / Linux 打包验证（Tauri 支持，但当前只验证 Windows）
-- [ ] 自动化端到端测试
+- [x] 自动化端到端测试（`src-tauri/tests/e2e.rs`：本地 TCP 服务器覆盖解析 → 变量替换 → 执行 → 脚本 → Cookie）
 
 > 兼容性目标：`.http` 语法与常用脚本 API 对齐 IntelliJ IDEA HTTP Client。未列出的冷门 API、IntelliJ 私有扩展与 IDE 集成能力不在当前范围内。
 

@@ -1,13 +1,15 @@
-mod cookies;
 mod envfile;
-mod executor;
 mod history;
-mod models;
-mod parser;
 mod recent;
 mod script;
 mod variables;
 mod workspace;
+
+// 供集成测试（tests/e2e.rs）复用解析与执行链路
+pub mod cookies;
+pub mod executor;
+pub mod models;
+pub mod parser;
 
 use cookies::SharedCookieStore;
 use models::{
