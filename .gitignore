@@ -10,3 +10,4 @@ examples/api/out/
 examples/.http-client/cookies.json
 examples/.http-client/history.json
 examples/.http-client/globals.json
+examples/.http-client/recent-files.json

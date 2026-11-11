@@ -51,9 +51,12 @@ pub fn lock_path() -> PathBuf {
 }
 
 /// PID 存活检测（跨平台，使用 sysinfo）
+/// 注意：只刷新进程信息，不用 System::new_all()——后者会刷新 CPU/磁盘/网络等
+/// 全部系统信息，Windows 上走 WMI 耗时数秒，在轮询路径上会卡死 UI。
 pub fn is_process_alive(pid: u32) -> bool {
-    use sysinfo::{Pid, System};
-    let sys = System::new_all();
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.process(Pid::from_u32(pid)).is_some()
 }
 
@@ -130,9 +133,14 @@ pub fn mcp_exe_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // 两个测试共享同一个全局 lock 文件，必须串行执行，否则并行时会互相覆盖
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn write_and_read_roundtrip() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let info = McpServerInfo {
             pid: std::process::id(),
             port: 18787,
@@ -150,6 +158,7 @@ mod tests {
 
     #[test]
     fn dead_pid_is_cleared() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // 找一个几乎肯定不存在的 PID：在高位范围内探测
         let mut dead_pid: Option<u32> = None;
         for candidate in (90000000..100000000u32).step_by(1000) {

@@ -544,7 +544,8 @@ fn get_mcp_status() -> McpStatus {
     mcp_status()
 }
 
-#[tauri::command]
+// async 命令在独立线程执行：spawn/sleep/taskkill 不会阻塞主线程 UI
+#[tauri::command(async)]
 fn start_mcp_server() -> Result<McpStatus, String> {
     // 已在运行则直接返回，不重复启动
     if let Some(info) = mcp_lock::read_info() {
@@ -553,11 +554,21 @@ fn start_mcp_server() -> Result<McpStatus, String> {
     let exe = mcp_lock::mcp_exe_path()
         .ok_or_else(|| "未找到 httpdeck-mcp 可执行文件，请先构建（cargo build --release -p httpdeck-mcp）".to_string())?;
     let port = MCP_DEFAULT_PORT;
-    let mut child = std::process::Command::new(&exe)
-        .arg("--port")
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--port")
         .arg(port.to_string())
-        .spawn()
-        .map_err(|e| format!("启动 httpdeck-mcp 失败: {e}"))?;
+        // 不继承 GUI 的 stdio，避免子进程关联控制台窗口
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("启动 httpdeck-mcp 失败: {e}"))?;
     // 给子进程一点时间写入 lock 文件
     std::thread::sleep(std::time::Duration::from_millis(500));
     match mcp_lock::read_info() {
@@ -570,7 +581,7 @@ fn start_mcp_server() -> Result<McpStatus, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_mcp_server() -> Result<McpStatus, String> {
     let info = mcp_lock::read_info().ok_or_else(|| "MCP server 未运行".to_string())?;
     mcp_lock::kill_by_pid(info.pid)?;
