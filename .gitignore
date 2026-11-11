@@ -1,8 +1,12 @@
 node_modules/
 dist/
+target/
 src-tauri/target/
 src-tauri/gen/
 *.log
 .DS_Store
 
 examples/api/out/
+examples/.http-client/cookies.json
+examples/.http-client/history.json
+examples/.http-client/globals.json

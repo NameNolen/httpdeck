@@ -1,19 +1,20 @@
 mod envfile;
-mod history;
-mod recent;
 mod script;
 mod variables;
-mod workspace;
 
-// 供集成测试（tests/e2e.rs）复用解析与执行链路
+// 供集成测试（tests/e2e.rs）与 MCP server 复用解析与执行链路
 pub mod cookies;
 pub mod executor;
+pub mod history;
+pub mod mcp_lock;
 pub mod models;
 pub mod parser;
+pub mod recent;
+pub mod workspace;
 
 use cookies::SharedCookieStore;
 use models::{
-    CookieInfo, FileRunResult, HistoryEntry, KeyValue, ParsedFileOutput, RequestResult,
+    CookieInfo, FileRunResult, HistoryEntry, KeyValue, McpStatus, ParsedFileOutput, RequestResult,
     WorkspaceInfo,
 };
 use std::collections::HashMap;
@@ -78,7 +79,12 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn list_history(workspace: String) -> Result<Vec<HistoryEntry>, String> {
-    let root = canonical_root(&workspace)?;
+    list_history_for(&workspace)
+}
+
+/// 供 MCP 等非 tauri 上下文调用：列出工作区请求历史
+pub fn list_history_for(workspace: &str) -> Result<Vec<HistoryEntry>, String> {
+    let root = canonical_root(workspace)?;
     Ok(history::list(&root))
 }
 
@@ -112,6 +118,31 @@ fn save_recent_files(root: &Path, files: &[String]) -> Result<(), String> {
         .map_err(|e| format!("保存最近文件失败 {}: {e}", path.display()))
 }
 
+// ---- globals 磁盘持久化（GUI 与 MCP 跨进程共享）----
+
+fn globals_path(root: &Path) -> PathBuf {
+    root.join(".http-client").join("globals.json")
+}
+
+fn load_globals(root: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(globals_path(root))
+        .ok()
+        .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_globals(root: &Path, globals: &HashMap<String, String>) -> Result<(), String> {
+    let path = globals_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录失败 {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(globals)
+        .map_err(|e| format!("序列化 globals 失败: {e}"))?;
+    std::fs::write(&path, text)
+        .map_err(|e| format!("保存 globals 失败 {}: {e}", path.display()))
+}
+
 fn absolute_recent_files(root: &Path, files: &[String]) -> Vec<String> {
     files
         .iter()
@@ -122,7 +153,12 @@ fn absolute_recent_files(root: &Path, files: &[String]) -> Vec<String> {
 
 #[tauri::command]
 fn list_recent_files(workspace: String) -> Result<Vec<String>, String> {
-    let root = canonical_root(&workspace)?;
+    list_recent_files_for(&workspace)
+}
+
+/// 供 MCP 等非 tauri 上下文调用：列出工作区最近打开的 .http 文件
+pub fn list_recent_files_for(workspace: &str) -> Result<Vec<String>, String> {
+    let root = canonical_root(workspace)?;
     Ok(absolute_recent_files(&root, &load_recent_files(&root)))
 }
 
@@ -145,7 +181,7 @@ fn clear_recent_files(workspace: String) -> Result<(), String> {
     save_recent_files(&root, &[])
 }
 
-fn canonical_root(path: &str) -> Result<PathBuf, String> {
+pub fn canonical_root(path: &str) -> Result<PathBuf, String> {
     let root = std::fs::canonicalize(path).map_err(|e| format!("无法打开目录 {path}: {e}"))?;
     if !root.is_dir() {
         return Err(format!("不是目录: {path}"));
@@ -162,13 +198,16 @@ fn snapshot_runtime(
     root: &Path,
 ) -> Result<(Arc<SharedCookieStore>, HashMap<String, String>), String> {
     let key = runtime_key(root);
-    let guard = state
+    let mut guard = state
         .workspaces
         .lock()
         .map_err(|_| "工作区状态锁失败".to_string())?;
-    let runtime = guard
-        .get(&key)
-        .ok_or_else(|| "工作区尚未打开，请重新打开目录".to_string())?;
+    // 若工作区尚未在内存中初始化（例如 MCP 独立进程直接调用执行），
+    // 则从磁盘加载 cookies 与 globals，实现跨进程共享。
+    let runtime = guard.entry(key).or_insert_with(|| WorkspaceRuntime {
+        cookies: cookies::load(root),
+        globals: load_globals(root),
+    });
     Ok((runtime.cookies.clone(), runtime.globals.clone()))
 }
 
@@ -176,9 +215,11 @@ fn store_globals(state: &AppState, root: &Path, globals: HashMap<String, String>
     let key = runtime_key(root);
     if let Ok(mut guard) = state.workspaces.lock() {
         if let Some(runtime) = guard.get_mut(&key) {
-            runtime.globals = globals;
+            runtime.globals = globals.clone();
         }
     }
+    // 同时持久化到磁盘，供 GUI / MCP 跨进程共享
+    let _ = save_globals(root, &globals);
 }
 
 fn build_workspace_info(state: &AppState, root: &Path) -> Result<WorkspaceInfo, String> {
@@ -237,7 +278,7 @@ fn open_workspace(state: State<'_, AppState>, path: String) -> Result<WorkspaceI
             .map_err(|_| "工作区状态锁失败".to_string())?;
         guard.entry(key).or_insert_with(|| WorkspaceRuntime {
             cookies: cookies::load(&root),
-            globals: HashMap::new(),
+            globals: load_globals(&root),
         });
     }
     let info = build_workspace_info(&state, &root)?;
@@ -481,6 +522,73 @@ fn set_client_cert(
     build_workspace_info(&state, &root)
 }
 
+// ---- MCP Server 管理 ----
+
+const MCP_DEFAULT_PORT: u16 = 18787;
+
+fn mcp_status() -> McpStatus {
+    let info = mcp_lock::read_info();
+    McpStatus {
+        running: info.is_some(),
+        pid: info.as_ref().map(|i| i.pid),
+        port: info.as_ref().map(|i| i.port),
+        endpoint: info.as_ref().map(|i| i.endpoint.clone()),
+        started_at: info.as_ref().map(|i| i.started_at.clone()),
+        lock_path: mcp_lock::lock_path().to_string_lossy().to_string(),
+        exe_path: mcp_lock::mcp_exe_path().map(|p| p.to_string_lossy().to_string()),
+    }
+}
+
+#[tauri::command]
+fn get_mcp_status() -> McpStatus {
+    mcp_status()
+}
+
+#[tauri::command]
+fn start_mcp_server() -> Result<McpStatus, String> {
+    // 已在运行则直接返回，不重复启动
+    if let Some(info) = mcp_lock::read_info() {
+        return Ok(mcp_status_from_info(&info));
+    }
+    let exe = mcp_lock::mcp_exe_path()
+        .ok_or_else(|| "未找到 httpdeck-mcp 可执行文件，请先构建（cargo build --release -p httpdeck-mcp）".to_string())?;
+    let port = MCP_DEFAULT_PORT;
+    let mut child = std::process::Command::new(&exe)
+        .arg("--port")
+        .arg(port.to_string())
+        .spawn()
+        .map_err(|e| format!("启动 httpdeck-mcp 失败: {e}"))?;
+    // 给子进程一点时间写入 lock 文件
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match mcp_lock::read_info() {
+        Some(info) => Ok(mcp_status_from_info(&info)),
+        None => {
+            // 进程可能已退出，尝试回收
+            let _ = child.wait();
+            Err("httpdeck-mcp 启动后未写入状态文件（可能端口被占用或启动失败）".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn stop_mcp_server() -> Result<McpStatus, String> {
+    let info = mcp_lock::read_info().ok_or_else(|| "MCP server 未运行".to_string())?;
+    mcp_lock::kill_by_pid(info.pid)?;
+    Ok(mcp_status())
+}
+
+fn mcp_status_from_info(info: &mcp_lock::McpServerInfo) -> McpStatus {
+    McpStatus {
+        running: true,
+        pid: Some(info.pid),
+        port: Some(info.port),
+        endpoint: Some(info.endpoint.clone()),
+        started_at: Some(info.started_at.clone()),
+        lock_path: mcp_lock::lock_path().to_string_lossy().to_string(),
+        exe_path: mcp_lock::mcp_exe_path().map(|p| p.to_string_lossy().to_string()),
+    }
+}
+
 /// 读取工作区配置的客户端证书，构建 reqwest Identity。
 /// 证书与私钥分开存放时拼接 PEM 字节；相对路径按工作区根目录解析。
 fn load_identity(root: &Path) -> Result<Option<reqwest::Identity>, String> {
@@ -523,8 +631,13 @@ fn load_identity(root: &Path) -> Result<Option<reqwest::Identity>, String> {
 
 #[tauri::command]
 fn get_globals(state: State<'_, AppState>, workspace: String) -> Result<Vec<KeyValue>, String> {
-    let root = canonical_root(&workspace)?;
-    let (_, globals) = snapshot_runtime(&state, &root)?;
+    get_globals_for(&state, &workspace)
+}
+
+/// 供 MCP 等非 tauri 上下文调用：查看脚本写入的 client.global 变量
+pub fn get_globals_for(state: &AppState, workspace: &str) -> Result<Vec<KeyValue>, String> {
+    let root = canonical_root(workspace)?;
+    let (_, globals) = snapshot_runtime(state, &root)?;
     let mut list: Vec<KeyValue> = globals
         .into_iter()
         .map(|(name, value)| KeyValue { name, value })
@@ -588,26 +701,25 @@ fn file_dir(path: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-#[tauri::command]
-async fn run_request(
-    state: State<'_, AppState>,
-    workspace: String,
-    file: String,
+pub async fn run_single_request(
+    state: &AppState,
+    workspace: &str,
+    file: &str,
     index: usize,
-    env: Option<String>,
+    env: Option<&str>,
 ) -> Result<RequestResult, String> {
     let _guard = state.run_lock.lock().await;
-    let root = canonical_root(&workspace)?;
-    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
-    let parsed = read_parsed(&file)?;
+    let root = canonical_root(workspace)?;
+    let (cookies, mut globals) = snapshot_runtime(state, &root)?;
+    let parsed = read_parsed(file)?;
     let def = parsed
         .requests
         .get(index)
         .ok_or_else(|| format!("请求 #{index} 不存在"))?;
-    let env_name = resolve_env(&root, env);
-    let env_vars = env_vars_for(&root, &file_dir(&file), env_name.as_deref());
+    let env_name = resolve_env(&root, env.map(|s| s.to_string()));
+    let env_vars = env_vars_for(&root, &file_dir(file), env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
-    let token = install_cancel_token(&state);
+    let token = install_cancel_token(state);
     let config = workspace::load_config(&root);
     let proxy = config.proxy;
     let identity = load_identity(&root)?;
@@ -617,35 +729,45 @@ async fn run_request(
         &env_vars,
         &mut globals,
         cookies.clone(),
-        &file_dir(&file),
+        &file_dir(file),
         Some(token),
         proxy.as_deref(),
         identity,
     )
     .await;
-    clear_cancel_token(&state);
-    history::record(&root, &file, &result);
+    clear_cancel_token(state);
+    history::record(&root, file, &result);
     cookies::save(&root, &cookies);
-    store_globals(&state, &root, globals);
+    store_globals(state, &root, globals);
     Ok(result)
 }
 
 #[tauri::command]
-async fn run_file(
+async fn run_request(
     state: State<'_, AppState>,
     workspace: String,
     file: String,
+    index: usize,
     env: Option<String>,
+) -> Result<RequestResult, String> {
+    run_single_request(&state, &workspace, &file, index, env.as_deref()).await
+}
+
+pub async fn run_http_file(
+    state: &AppState,
+    workspace: &str,
+    file: &str,
+    env: Option<&str>,
 ) -> Result<Vec<RequestResult>, String> {
     let _guard = state.run_lock.lock().await;
-    let root = canonical_root(&workspace)?;
-    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
-    let parsed = read_parsed(&file)?;
-    let env_name = resolve_env(&root, env);
-    let dir = file_dir(&file);
+    let root = canonical_root(workspace)?;
+    let (cookies, mut globals) = snapshot_runtime(state, &root)?;
+    let parsed = read_parsed(file)?;
+    let env_name = resolve_env(&root, env.map(|s| s.to_string()));
+    let dir = file_dir(file);
     let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
     let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
-    let token = install_cancel_token(&state);
+    let token = install_cancel_token(state);
     let config = workspace::load_config(&root);
     let proxy = config.proxy;
     let identity = load_identity(&root)?;
@@ -666,28 +788,37 @@ async fn run_file(
             identity.clone(),
         )
         .await;
-        history::record(&root, &file, &result);
+        history::record(&root, file, &result);
         results.push(result);
     }
-    clear_cancel_token(&state);
+    clear_cancel_token(state);
     cookies::save(&root, &cookies);
-    store_globals(&state, &root, globals);
+    store_globals(state, &root, globals);
     Ok(results)
 }
 
 #[tauri::command]
-async fn run_folder(
+async fn run_file(
     state: State<'_, AppState>,
     workspace: String,
-    folder: String,
+    file: String,
     env: Option<String>,
+) -> Result<Vec<RequestResult>, String> {
+    run_http_file(&state, &workspace, &file, env.as_deref()).await
+}
+
+pub async fn run_http_folder(
+    state: &AppState,
+    workspace: &str,
+    folder: &str,
+    env: Option<&str>,
 ) -> Result<Vec<FileRunResult>, String> {
     let _guard = state.run_lock.lock().await;
-    let root = canonical_root(&workspace)?;
-    let (cookies, mut globals) = snapshot_runtime(&state, &root)?;
-    let env_name = resolve_env(&root, env);
-    let files = workspace::collect_http_files(Path::new(&folder));
-    let token = install_cancel_token(&state);
+    let root = canonical_root(workspace)?;
+    let (cookies, mut globals) = snapshot_runtime(state, &root)?;
+    let env_name = resolve_env(&root, env.map(|s| s.to_string()));
+    let files = workspace::collect_http_files(Path::new(folder));
+    let token = install_cancel_token(state);
     let config = workspace::load_config(&root);
     let proxy = config.proxy;
     let identity = load_identity(&root)?;
@@ -704,7 +835,6 @@ async fn run_folder(
         match read_parsed(&file_string) {
             Ok(parsed) => {
                 let dir = file_dir(&file_string);
-                // 目录级环境：每个文件按自己的目录链解析
                 let env_vars = env_vars_for(&root, &dir, env_name.as_deref());
                 let file_vars: HashMap<String, String> = parsed.variables.into_iter().collect();
                 let mut results = Vec::new();
@@ -742,10 +872,20 @@ async fn run_folder(
             }),
         }
     }
-    clear_cancel_token(&state);
+    clear_cancel_token(state);
     cookies::save(&root, &cookies);
-    store_globals(&state, &root, globals);
+    store_globals(state, &root, globals);
     Ok(output)
+}
+
+#[tauri::command]
+async fn run_folder(
+    state: State<'_, AppState>,
+    workspace: String,
+    folder: String,
+    env: Option<String>,
+) -> Result<Vec<FileRunResult>, String> {
+    run_http_folder(&state, &workspace, &folder, env.as_deref()).await
 }
 
 #[tauri::command]
@@ -785,6 +925,9 @@ pub fn run() {
             set_env,
             set_proxy,
             set_client_cert,
+            get_mcp_status,
+            start_mcp_server,
+            stop_mcp_server,
             get_globals,
             clear_globals,
             list_variables,

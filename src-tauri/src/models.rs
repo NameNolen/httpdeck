@@ -139,6 +139,18 @@ pub struct WorkspaceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpStatus {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub endpoint: Option<String>,
+    pub started_at: Option<String>,
+    pub lock_path: String,
+    pub exe_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoryEntry {
     pub time: String,
     pub file: String,

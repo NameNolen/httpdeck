@@ -73,6 +73,14 @@
 - `client.global` 变量查看与清空
 - 快捷键：`Ctrl+S` 保存、`Ctrl+Enter` 运行光标所在请求
 
+### 6. MCP Server（AI Agent 集成）
+
+- 顶栏 **MCP** 按钮打开状态面板，可一键启动 / 停止内置 MCP Server（默认监听 `127.0.0.1:18787`，端点 `/mcp`，Streamable HTTP）
+- 对外暴露 8 个工具：`parse_http_text`、`run_request`、`run_file`、`run_folder`、`list_workspaces`、`list_recent_files`、`list_history`、`get_globals`
+- MCP 调用与 GUI 操作共用同一套记录：请求历史写入工作区 `.http-client/history.json`，`client.global` 写入 `.http-client/globals.json`，Cookie 共用同一 Cookie 存储
+- 运行状态通过 `%APPDATA%\HttpDeck\mcp-server.json` 跨进程共享，GUI 与 `httpdeck-mcp` 先后启动互不影响；进程异常退出后残留的锁文件会在下次读取时按 PID 存活状态自动清理
+- 因 MCP 为独立进程，需先构建：`cargo build --release -p httpdeck-mcp`
+
 ---
 
 ## 待办 / 路线图

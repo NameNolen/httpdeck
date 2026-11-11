@@ -1729,6 +1729,86 @@ body.v-drag {
   border-radius: 4px;
 }
 
+/* ---- MCP Server ---- */
+
+.mcp-active {
+  color: var(--accent);
+}
+
+.mcp-status-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp-status-row:last-of-type {
+  border-bottom: none;
+}
+
+.mcp-label {
+  flex: 0 0 80px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.mcp-value {
+  flex: 1;
+  font-size: 13px;
+  word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-running {
+  color: #2ecc71;
+  font-weight: 600;
+}
+
+.mcp-stopped {
+  color: var(--muted);
+}
+
+.mcp-endpoint {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.mcp-path {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.mcp-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.mcp-hint code {
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.mcp-loading {
+  padding: 16px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ghost-button.compact {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
 .modal-input {
   width: 100%;
   box-sizing: border-box;

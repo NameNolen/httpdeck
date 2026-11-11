@@ -101,6 +101,16 @@ export interface CookieInfo {
   expires: string | null;
 }
 
+export interface McpStatus {
+  running: boolean;
+  pid: number | null;
+  port: number | null;
+  endpoint: string | null;
+  startedAt: string | null;
+  lockPath: string;
+  exePath: string | null;
+}
+
 export const api = {
   initialWorkspace: () => invoke<string | null>("initial_workspace"),
   recentWorkspaces: () => invoke<string[]>("recent_workspaces"),
@@ -149,4 +159,7 @@ export const api = {
   listCookies: (workspace: string) => invoke<CookieInfo[]>("list_cookies", { workspace }),
   clearCookies: (workspace: string) => invoke<void>("clear_cookies", { workspace }),
   revealInExplorer: (path: string) => invoke<void>("reveal_in_explorer", { path }),
+  getMcpStatus: () => invoke<McpStatus>("get_mcp_status"),
+  startMcp: () => invoke<McpStatus>("start_mcp_server"),
+  stopMcp: () => invoke<McpStatus>("stop_mcp_server"),
 };

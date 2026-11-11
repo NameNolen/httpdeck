@@ -6,6 +6,7 @@ import {
   type FileNode,
   type HistoryEntry,
   type KeyValue,
+  type McpStatus,
   type ParsedFile,
   type RequestResult,
   type WorkspaceInfo,
@@ -85,6 +86,9 @@ export default function App() {
   const [proxyInput, setProxyInput] = useState("");
   const [certInput, setCertInput] = useState("");
   const [keyInput, setKeyInput] = useState("");
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  const [mcpBusy, setMcpBusy] = useState(false);
   const [fileDialog, setFileDialog] = useState<
     | { kind: "create"; root: string; parent: string; value: string }
     | { kind: "rename"; root: string; path: string; value: string }
@@ -792,6 +796,62 @@ export default function App() {
     }
   }, [workspace, proxyInput, certInput, keyInput, upsertWorkspace]);
 
+  // ---- MCP Server ----
+
+  const refreshMcpStatus = useCallback(async () => {
+    try {
+      setMcpStatus(await api.getMcpStatus());
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  }, []);
+
+  const openMcp = useCallback(() => {
+    setMcpOpen(true);
+    void refreshMcpStatus();
+  }, [refreshMcpStatus]);
+
+  // 弹窗打开时轮询状态（2 秒），及时反映 MCP 进程变化
+  useEffect(() => {
+    if (!mcpOpen) return;
+    void refreshMcpStatus();
+    const timer = setInterval(() => {
+      void refreshMcpStatus();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [mcpOpen, refreshMcpStatus]);
+
+  const startMcpServer = useCallback(async () => {
+    setMcpBusy(true);
+    try {
+      const status = await api.startMcp();
+      setMcpStatus(status);
+      if (status.running) {
+        setNotice({
+          kind: "info",
+          message: `MCP Server 已启动 · ${status.endpoint ?? ""}`,
+        });
+      }
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    } finally {
+      setMcpBusy(false);
+    }
+  }, []);
+
+  const stopMcpServer = useCallback(async () => {
+    setMcpBusy(true);
+    try {
+      const status = await api.stopMcp();
+      setMcpStatus(status);
+      setNotice({ kind: "info", message: "MCP Server 已停止" });
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    } finally {
+      setMcpBusy(false);
+    }
+  }, []);
+
   const clearGlobals = useCallback(async () => {
     if (!workspace) return;
     try {
@@ -902,6 +962,13 @@ export default function App() {
             disabled={!workspace}
           >
             刷新
+          </button>
+          <button
+            className={`ghost-button ${mcpStatus?.running ? "mcp-active" : ""}`}
+            onClick={() => void openMcp()}
+            title="MCP Server：让 AI agent 调用 HttpDeck 执行请求"
+          >
+            MCP{mcpStatus?.running ? " ●" : ""}
           </button>
           <button className="ghost-button" onClick={() => void pickWorkspace()}>
             添加目录
@@ -1307,6 +1374,100 @@ export default function App() {
               <button className="primary-button compact" onClick={() => void saveProxy()}>
                 保存
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mcpOpen && (
+        <div className="modal-backdrop" onClick={() => setMcpOpen(false)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <h2>MCP Server</h2>
+              <button className="icon-button" onClick={() => setMcpOpen(false)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {mcpStatus ? (
+                <>
+                  <div className="mcp-status-row">
+                    <span className="mcp-label">状态</span>
+                    <span className={`mcp-value ${mcpStatus.running ? "mcp-running" : "mcp-stopped"}`}>
+                      {mcpStatus.running ? "● 运行中" : "○ 未运行"}
+                    </span>
+                  </div>
+                  {mcpStatus.running && (
+                    <>
+                      <div className="mcp-status-row">
+                        <span className="mcp-label">PID</span>
+                        <span className="mcp-value">{mcpStatus.pid}</span>
+                      </div>
+                      <div className="mcp-status-row">
+                        <span className="mcp-label">端口</span>
+                        <span className="mcp-value">{mcpStatus.port}</span>
+                      </div>
+                      <div className="mcp-status-row">
+                        <span className="mcp-label">Endpoint</span>
+                        <span className="mcp-value mcp-endpoint">
+                          {mcpStatus.endpoint}
+                          {mcpStatus.endpoint && (
+                            <button
+                              className="ghost-button compact"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(mcpStatus.endpoint!);
+                                setNotice({ kind: "info", message: "Endpoint 已复制到剪贴板" });
+                              }}
+                            >
+                              复制
+                            </button>
+                          )}
+                        </span>
+                      </div>
+                      <div className="mcp-status-row">
+                        <span className="mcp-label">启动时间</span>
+                        <span className="mcp-value">{mcpStatus.startedAt}</span>
+                      </div>
+                    </>
+                  )}
+                  <div className="mcp-status-row">
+                    <span className="mcp-label">可执行文件</span>
+                    <span className="mcp-value mcp-path">
+                      {mcpStatus.exePath ?? "未找到（需先 cargo build --release -p httpdeck-mcp）"}
+                    </span>
+                  </div>
+                  <div className="mcp-status-row">
+                    <span className="mcp-label">状态文件</span>
+                    <span className="mcp-value mcp-path">{mcpStatus.lockPath}</span>
+                  </div>
+                  <p className="mcp-hint">
+                    MCP Server 通过 Streamable HTTP 暴露 HttpDeck 的解析与执行能力。AI agent
+                    调用产生的请求会写入工作区 <code>.http-client/history.json</code>，与 GUI
+                    操作共用同一套历史记录。先后启动互不影响。
+                  </p>
+                </>
+              ) : (
+                <div className="mcp-loading">读取状态中…</div>
+              )}
+            </div>
+            <div className="modal-foot">
+              {mcpStatus?.running ? (
+                <button
+                  className="secondary-button"
+                  onClick={() => void stopMcpServer()}
+                  disabled={mcpBusy}
+                >
+                  {mcpBusy ? "停止中…" : "停止 MCP Server"}
+                </button>
+              ) : (
+                <button
+                  className="primary-button compact"
+                  onClick={() => void startMcpServer()}
+                  disabled={mcpBusy || !mcpStatus?.exePath}
+                >
+                  {mcpBusy ? "启动中…" : "启动 MCP Server"}
+                </button>
+              )}
             </div>
           </div>
         </div>

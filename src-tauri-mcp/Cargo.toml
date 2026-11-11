@@ -1,0 +1,21 @@
+[package]
+name = "httpdeck-mcp"
+version = "0.1.0"
+description = "MCP server for HttpDeck"
+edition = "2021"
+
+[[bin]]
+name = "httpdeck-mcp"
+path = "src/main.rs"
+
+[dependencies]
+httpdeck = { path = "../src-tauri" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+rmcp = { version = "3.9", features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
+axum = "0.8"
+ctrlc = "3"
+schemars = "1"
