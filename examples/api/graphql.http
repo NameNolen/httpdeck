@@ -1,0 +1,35 @@
+// GraphQL 请求体示例：`graphql { ... }` 块会自动转换为 JSON（{"query": ..., "variables": ...}）
+// 并自动补 Content-Type: application/json
+
+### 查询（无变量）
+POST https://countries.trevithick.me/graphql
+
+graphql
+query {
+  countries(filter: { code: { in: ["CN", "US", "JP"] } }) {
+    code
+    name
+  }
+}
+
+### 带变量的查询
+POST https://countries.trevithick.me/graphql
+
+graphql {
+  query getCountry($code: ID!) {
+    country(code: $code) {
+      code
+      name
+      capital
+    }
+  }
+  variables {
+    "code": "CN"
+  }
+}
+
+> {%
+    client.test("GraphQL 返回国家", function () {
+        client.assert(response.body.errors === undefined, "GraphQL 错误: " + JSON.stringify(response.body.errors));
+    });
+%}

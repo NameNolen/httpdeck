@@ -34,6 +34,8 @@ pub struct RequestDef {
     pub post_scripts: Vec<ScriptSpec>,
     pub save_response: Option<SaveSpec>,
     pub options: RequestOptions,
+    /// 请求体来自 `graphql { ... }` 块，已转换为 JSON（{"query": ...}）
+    pub graphql: bool,
     pub line: usize,
 }
 
@@ -205,6 +207,7 @@ struct RequestBuilder {
     post_scripts: Vec<ScriptSpec>,
     save_response: Option<SaveSpec>,
     options: RequestOptions,
+    graphql: bool,
     line: usize,
 }
 
@@ -228,6 +231,7 @@ impl RequestBuilder {
             post_scripts: Vec::new(),
             save_response: None,
             options: RequestOptions::default(),
+            graphql: false,
             line,
         }
     }
@@ -248,6 +252,7 @@ impl RequestBuilder {
             post_scripts: self.post_scripts,
             save_response: self.save_response,
             options: self.options,
+            graphql: self.graphql,
             line: self.line,
         }
     }
@@ -348,6 +353,129 @@ fn read_directive(lines: &[&str], start: usize) -> Option<(Directive, usize)> {
     None
 }
 
+/// 识别 IntelliJ 风格的 GraphQL 请求体（`graphql { ... }` 或 `graphql` 后跟查询文本），
+/// 转换为 JSON 内联体 `{"query": ..., "variables": ...}`。
+/// 无法识别时保持 BodySpec::None，由调用方回退为普通文本体。
+fn try_parse_graphql_body(body_lines: &[&str], builder: &mut RequestBuilder) {
+    let Some(first_idx) = body_lines.iter().position(|l| !l.trim().is_empty()) else {
+        return;
+    };
+    let first = body_lines[first_idx].trim();
+    let Some(rest) = first.strip_prefix("graphql") else {
+        return;
+    };
+    // 必须是独立关键字：后面只能是空白或 '{'（避免误匹配 graphqlFoo 之类）
+    if let Some(c) = rest.chars().next() {
+        if c != '{' && !c.is_whitespace() {
+            return;
+        }
+    }
+    let remainder = rest.trim_start();
+    let braced = remainder.starts_with('{');
+    let mut content: Vec<String> = Vec::new();
+    if braced {
+        let inner = remainder[1..].trim_end();
+        if !inner.is_empty() {
+            content.push(inner.to_string());
+        }
+    } else if !remainder.is_empty() {
+        content.push(remainder.to_string());
+    }
+    for line in &body_lines[first_idx + 1..] {
+        content.push(line.to_string());
+    }
+    // 花括号包裹时去掉最外层的收尾 '}'
+    if braced {
+        strip_trailing_brace(&mut content);
+    }
+    match graphql_content_to_json(&content) {
+        Some(json) => {
+            builder.body = BodySpec::Inline(json);
+            builder.graphql = true;
+        }
+        None => {}
+    }
+}
+
+fn graphql_content_to_json(content: &[String]) -> Option<String> {
+    let mut query_lines: Vec<String> = Vec::new();
+    let mut var_lines: Vec<String> = Vec::new();
+    let mut in_vars = false;
+    for line in content {
+        let t = line.trim();
+        if in_vars {
+            var_lines.push(line.clone());
+            continue;
+        }
+        if t == "variables {" || t == "variables{" {
+            in_vars = true;
+            continue;
+        }
+        if let Some(after) = t.strip_prefix("variables{") {
+            in_vars = true;
+            var_lines.push(after.to_string());
+            continue;
+        }
+        if let Some(after) = t.strip_prefix("variables {") {
+            in_vars = true;
+            let after = after.trim();
+            if !after.is_empty() {
+                var_lines.push(after.to_string());
+            }
+            continue;
+        }
+        query_lines.push(line.clone());
+    }
+    let query = dedent_lines(&query_lines);
+    if query.is_empty() {
+        return None;
+    }
+    let mut payload = serde_json::json!({ "query": query });
+    if in_vars {
+        strip_trailing_brace(&mut var_lines);
+        let vars_text = dedent_lines(&var_lines);
+        if vars_text.is_empty() {
+            return None;
+        }
+        let wrapped = format!("{{ {vars_text} }}");
+        match serde_json::from_str::<serde_json::Value>(&wrapped) {
+            Ok(v) if v.is_object() => payload["variables"] = v,
+            _ => return None,
+        }
+    }
+    serde_json::to_string(&payload).ok()
+}
+
+/// 去掉最后一个非空行末尾的一个 '}'
+fn strip_trailing_brace(lines: &mut Vec<String>) {
+    if let Some(last) = lines.iter_mut().rfind(|l| !l.trim().is_empty()) {
+        let t = last.trim_end();
+        if t.ends_with('}') {
+            *last = t[..t.len() - 1].trim_end().to_string();
+        }
+    }
+}
+
+/// 按公共缩进去缩进，跳过空行，返回 trim 后的文本
+fn dedent_lines(lines: &[String]) -> String {
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let own_indent = line.len() - line.trim_start().len();
+        out.push_str(&line[own_indent.min(indent)..]);
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
 fn parse_request_body(
     lines: &[&str],
     mut i: usize,
@@ -436,7 +564,10 @@ fn parse_request_body(
             {
                 builder.body = BodySpec::FromFile(first[2..].trim().to_string());
             } else {
-                builder.body = BodySpec::Inline(body_lines.join("\n"));
+                try_parse_graphql_body(&body_lines, builder);
+                if builder.body == BodySpec::None {
+                    builder.body = BodySpec::Inline(body_lines.join("\n"));
+                }
             }
         }
     }
@@ -676,5 +807,79 @@ GET http://localhost:8080/no-redirect
         assert!(parsed.requests[0].options.no_redirect);
         assert!(parsed.requests[0].options.no_cookie_jar);
         assert_eq!(parsed.requests[0].options.timeout_ms, Some(3500));
+    }
+
+    #[test]
+    fn parses_graphql_braced_body_with_variables() {
+        let src = r#"
+### GraphQL request
+POST https://api.github.com/graphql
+Content-Type: application/json
+
+graphql {
+  query {
+    viewer {
+      login
+    }
+  }
+  variables {
+    "first": 10
+  }
+}
+"#;
+        let parsed = parse(src);
+        assert!(parsed.requests[0].graphql);
+        let BodySpec::Inline(body) = &parsed.requests[0].body else {
+            panic!("expected inline body");
+        };
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            value["query"].as_str().unwrap(),
+            "query {\n  viewer {\n    login\n  }\n}"
+        );
+        assert_eq!(value["variables"]["first"], 10);
+        assert!(value.get("query").is_some());
+    }
+
+    #[test]
+    fn parses_graphql_unbraced_body() {
+        let src = r#"
+### GraphQL no variables
+POST https://api.example.com/graphql
+
+graphql
+query GetUser($id: ID!) {
+  user(id: $id) {
+    name
+  }
+}
+"#;
+        let parsed = parse(src);
+        assert!(parsed.requests[0].graphql);
+        let BodySpec::Inline(body) = &parsed.requests[0].body else {
+            panic!("expected inline body");
+        };
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(value["query"]
+            .as_str()
+            .unwrap()
+            .contains("query GetUser($id: ID!)"));
+        assert!(value.get("variables").is_none());
+    }
+
+    #[test]
+    fn does_not_treat_graphql_word_as_keyword() {
+        let src = r#"
+### plain text body
+POST http://localhost:8080/echo
+
+graphqlfoo is not a keyword
+"#;
+        let parsed = parse(src);
+        assert!(!parsed.requests[0].graphql);
+        assert_eq!(
+            parsed.requests[0].body,
+            BodySpec::Inline("graphqlfoo is not a keyword".to_string())
+        );
     }
 }

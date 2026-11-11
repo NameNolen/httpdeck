@@ -187,11 +187,19 @@ pub async fn execute_request(
         request_vars: &request_vars,
     };
     let url = variables::resolve(&def.url, &ctx);
-    let resolved_headers: Vec<(String, String)> = def
+    let mut resolved_headers: Vec<(String, String)> = def
         .headers
         .iter()
         .map(|(n, v)| (n.clone(), variables::resolve(v, &ctx)))
         .collect();
+    // GraphQL 块自动补 Content-Type
+    if def.graphql
+        && !resolved_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("content-type"))
+    {
+        resolved_headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    }
     let multipart_content_type = resolved_headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
@@ -1003,6 +1011,7 @@ client.global.set("saved", response.body.name);
 "#;
         let def = RequestDef {
             index: 0,
+            graphql: false,
             name: Some("test".to_string()),
             method: "POST".to_string(),
             url: format!("http://{addr}/hello"),
@@ -1062,6 +1071,7 @@ client.global.set("saved", response.body.name);
 
         let def = RequestDef {
             index: 0,
+            graphql: false,
             name: None,
             method: "GET".to_string(),
             url: format!("http://{addr}/slow"),
@@ -1127,6 +1137,7 @@ client.global.set("saved", response.body.name);
 
         let def = RequestDef {
             index: 0,
+            graphql: false,
             name: None,
             method: "GET".to_string(),
             url: format!("http://{addr}/"),
@@ -1197,6 +1208,7 @@ client.global.set("saved", response.body.name);
 
         let def = RequestDef {
             index: 0,
+            graphql: false,
             name: None,
             method: "GET".to_string(),
             url: format!("http://{addr}/start"),
@@ -1286,6 +1298,7 @@ Content-Type: text/plain\n\
 --WebAppBoundary--";
         let def = RequestDef {
             index: 0,
+            graphql: false,
             name: None,
             method: "POST".to_string(),
             url: format!("http://{addr}/upload"),
