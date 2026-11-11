@@ -20,6 +20,7 @@
 - 可关闭 Cookie：`// @no-cookie-jar`
 - 可忽略 TLS 证书校验：`// @no-ssl-verification`
 - 支持 gzip / brotli / deflate 响应自动解压
+- WebSocket：`// @websocket` 指令把 GET 请求转为 WS 连接，请求体作为一条文本消息发送，收集到的帧按行显示（服务器关闭或窗口结束时返回，窗口默认 10 秒，`@timeout` 可调整）
 - 二进制响应自动识别并以 Base64 展示
 - 保存响应到文件：`>> ./response.json`（追加）、`>>! ./response.json`（覆盖）、`<> ./response.json`（覆盖）
 
@@ -101,7 +102,7 @@
 
 ### 低优先级 / 暂不支持
 
-- [ ] WebSocket
+- [x] WebSocket（`// @websocket` 指令：握手、发送请求体、收集帧）
 - [x] Server-Sent Events（响应栏事件流提示与 data 事件计数）
 - [ ] gRPC
 - [x] GraphQL 专用请求体（`graphql { ... }` 块自动转 JSON 并补 Content-Type）

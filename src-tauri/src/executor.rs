@@ -4,9 +4,13 @@ use crate::parser::{BodySpec, RequestDef, SaveSpec, ScriptSpec};
 use crate::script::{self, ScriptRequest, ScriptResponse};
 use crate::variables::{self, VariableContext};
 use base64::Engine;
+use futures_util::{SinkExt, StreamExt};
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, Url};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderName as WsHeaderName;
+use tokio_tungstenite::tungstenite::Message;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -254,6 +258,25 @@ pub async fn execute_request(
             )
         }
     };
+
+    // `// @websocket`：按 WebSocket 连接处理
+    if def.options.websocket {
+        return run_websocket_request(
+            def,
+            &url,
+            &parsed_url,
+            &resolved_headers,
+            body_preview,
+            base_dir,
+            globals,
+            &request_vars,
+            cancel,
+            tests,
+            logs,
+            script_error,
+        )
+        .await;
+    }
 
     let mut header_map = HeaderMap::new();
     let mut has_user_agent = false;
@@ -533,6 +556,311 @@ pub async fn execute_request(
         timeout_ms: def.options.timeout_ms,
         no_redirect: def.options.no_redirect,
         redirected,
+        error: None,
+    }
+}
+
+/// WebSocket 请求（`// @websocket`）：握手 → 可选发送 body → 收集帧直到关闭或超时。
+/// 帧文本按行拼进响应体；状态码为握手响应码（101）。
+#[allow(clippy::too_many_arguments)]
+async fn run_websocket_request(
+    def: &RequestDef,
+    url: &str,
+    parsed_url: &Url,
+    resolved_headers: &[(String, String)],
+    body_preview: Option<String>,
+    base_dir: &Path,
+    globals: &mut HashMap<String, String>,
+    request_vars: &HashMap<String, String>,
+    cancel: Option<Arc<CancelToken>>,
+    mut tests: Vec<crate::models::TestResult>,
+    mut logs: Vec<String>,
+    mut script_error: Option<String>,
+) -> RequestResult {
+    let started = Instant::now();
+    let ws_url_str = match parsed_url.scheme() {
+        "ws" | "wss" => parsed_url.as_str().to_string(),
+        "http" => parsed_url.as_str().replacen("http", "ws", 1),
+        "https" => parsed_url.as_str().replacen("https", "wss", 1),
+        other => {
+            return simple_failure(
+                def,
+                url,
+                resolved_headers,
+                body_preview,
+                tests,
+                logs,
+                script_error,
+                format!("WebSocket 不支持 {other} 协议"),
+            )
+        }
+    };
+
+    let mut request = match ws_url_str.as_str().into_client_request() {
+        Ok(request) => request,
+        Err(err) => {
+            return simple_failure(
+                def,
+                url,
+                resolved_headers,
+                body_preview,
+                tests,
+                logs,
+                script_error,
+                format!("WebSocket 地址无效 `{ws_url_str}`: {err}"),
+            )
+        }
+    };
+    // tungstenite 自己生成握手头，用户头里跳过这些保留字段
+    const RESERVED: &[&str] = &[
+        "host",
+        "connection",
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-protocol",
+    ];
+    for (name, value) in resolved_headers {
+        let lower = name.to_ascii_lowercase();
+        if RESERVED.contains(&lower.as_str()) {
+            continue;
+        }
+        let (Ok(header_name), Ok(header_value)) = (
+            WsHeaderName::from_bytes(lower.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        request.headers_mut().insert(header_name, header_value);
+    }
+
+    let handshake_timeout = Duration::from_millis(def.options.timeout_ms.unwrap_or(60_000));
+    let connect_future =
+        tokio::time::timeout(handshake_timeout, tokio_tungstenite::connect_async(request));
+    let connect_result = match &cancel {
+        Some(token) => tokio::select! {
+            _ = token.notified() => {
+                return simple_failure(
+                    def,
+                    url,
+                    resolved_headers,
+                    body_preview,
+                    tests,
+                    logs,
+                    script_error,
+                    "请求已取消".to_string(),
+                );
+            }
+            result = connect_future => result,
+        },
+        None => connect_future.await,
+    };
+    let (mut ws, response) = match connect_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(err)) => {
+            return simple_failure(
+                def,
+                url,
+                resolved_headers,
+                body_preview,
+                tests,
+                logs,
+                script_error,
+                format!("WebSocket 握手失败: {err}"),
+            )
+        }
+        Err(_) => {
+            return simple_failure(
+                def,
+                url,
+                resolved_headers,
+                body_preview,
+                tests,
+                logs,
+                script_error,
+                format!("WebSocket 握手超时（{} ms）", handshake_timeout.as_millis()),
+            )
+        }
+    };
+    let status = response.status().as_u16();
+    let status_text = response
+        .status()
+        .canonical_reason()
+        .unwrap_or_default()
+        .to_string();
+    let response_headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                value
+                    .to_str()
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|_| "<非文本响应头>".to_string()),
+            )
+        })
+        .collect();
+    if status != 101 {
+        return simple_failure(
+            def,
+            url,
+            resolved_headers,
+            body_preview,
+            tests,
+            logs,
+            script_error,
+            format!("WebSocket 握手未升级（状态码 {status}）"),
+        );
+    }
+
+    // 请求体非空时作为一条文本消息发送（echo 场景）
+    if let Some(text) = body_preview.as_deref().filter(|t| !t.trim().is_empty()) {
+        let send_result = tokio::time::timeout(Duration::from_secs(5), ws.send(Message::text(text))).await;
+        match send_result {
+            Ok(Ok(())) => logs.push(format!("已发送 WebSocket 消息（{} 字节）", text.len())),
+            Ok(Err(err)) => logs.push(format!("发送 WebSocket 消息失败: {err}")),
+            Err(_) => logs.push("发送 WebSocket 消息超时".to_string()),
+        }
+    }
+
+    // 收集帧：服务器关闭、收集窗口耗尽或用户取消为止
+    let collect_window = Duration::from_millis(def.options.timeout_ms.unwrap_or(10_000));
+    let deadline = Instant::now() + collect_window;
+    let mut frames: Vec<String> = Vec::new();
+    let mut total_bytes = 0usize;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            logs.push(format!(
+                "WebSocket 收集窗口结束（{} 毫秒），可用 @timeout 调整",
+                collect_window.as_millis()
+            ));
+            break;
+        }
+        let next = tokio::time::timeout(remaining, ws.next());
+        let frame = match &cancel {
+            Some(token) => tokio::select! {
+                _ = token.notified() => {
+                    return simple_failure(
+                        def,
+                        url,
+                        resolved_headers,
+                        body_preview,
+                        tests,
+                        logs,
+                        script_error,
+                        "请求已取消".to_string(),
+                    );
+                }
+                result = next => result,
+            },
+            None => next.await,
+        };
+        match frame {
+            Err(_) => {
+                logs.push("WebSocket 收集超时".to_string());
+                break;
+            }
+            Ok(None) => break,
+            Ok(Some(Ok(message))) => match message {
+                Message::Text(text) => {
+                    total_bytes += text.len();
+                    frames.push(text.to_string());
+                }
+                Message::Binary(bytes) => {
+                    total_bytes += bytes.len();
+                    frames.push(format!("[二进制帧 {} 字节]", bytes.len()));
+                }
+                Message::Close(_) => break,
+                _ => {}
+            },
+            Ok(Some(Err(err))) => {
+                logs.push(format!("WebSocket 连接中断: {err}"));
+                break;
+            }
+        }
+    }
+    let body_text = frames.join("\n");
+
+    // 后置脚本与保存响应，逻辑与普通请求一致
+    if !def.post_scripts.is_empty() {
+        match load_scripts(&def.post_scripts, base_dir) {
+            Ok(sources) => {
+                let outcome = script::run_scripts(
+                    &sources,
+                    globals,
+                    request_vars,
+                    &ScriptRequest {
+                        method: def.method.clone(),
+                        url: url.to_string(),
+                        body: body_preview.clone(),
+                    },
+                    Some(&ScriptResponse {
+                        status,
+                        headers: response_headers.clone(),
+                        body_text: body_text.clone(),
+                        mime_type: None,
+                        charset: None,
+                    }),
+                );
+                *globals = outcome.globals;
+                tests.extend(outcome.tests);
+                logs.extend(outcome.logs);
+                if let Some(err) = outcome.error {
+                    script_error = Some(err);
+                }
+            }
+            Err(err) => script_error = Some(err),
+        }
+    }
+
+    let saved_bytes = body_text.as_bytes().to_vec();
+    let saved_to = match &def.save_response {
+        Some(spec) => match save_response(spec, &saved_bytes, base_dir) {
+            Ok(path) => Some(path.to_string_lossy().to_string()),
+            Err(err) => {
+                if script_error.is_none() {
+                    script_error = Some(err);
+                }
+                None
+            }
+        },
+        None => None,
+    };
+
+    RequestResult {
+        request_index: def.index,
+        name: def.display_name(),
+        method: def.method.clone(),
+        url: url.to_string(),
+        request_headers: resolved_headers
+            .iter()
+            .map(|(name, value)| KeyValue {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        request_body: body_preview,
+        status,
+        status_text,
+        response_headers: response_headers
+            .into_iter()
+            .map(|(name, value)| KeyValue { name, value })
+            .collect(),
+        body: body_text,
+        body_is_binary: false,
+        mime_type: None,
+        size: total_bytes,
+        duration_ms: started.elapsed().as_millis(),
+        tests,
+        logs,
+        script_error,
+        saved_to,
+        timeout_ms: def.options.timeout_ms,
+        no_redirect: def.options.no_redirect,
+        redirected: false,
         error: None,
     }
 }

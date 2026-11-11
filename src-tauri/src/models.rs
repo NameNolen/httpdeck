@@ -8,6 +8,8 @@ pub struct RequestOptions {
     pub no_log: bool,
     pub timeout_ms: Option<u64>,
     pub accept_invalid_certs: bool,
+    /// `// @websocket`：按 WebSocket 连接处理（握手、发送 body、收集帧）
+    pub websocket: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

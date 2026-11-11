@@ -1,0 +1,16 @@
+// WebSocket 示例：`// @websocket` 指令把 GET 请求转为 WebSocket 连接
+// 请求体（若有）会作为一条文本消息发送；收集到的帧按行显示在响应体里
+// 服务器关闭或收集窗口结束（默认 10 秒，@timeout 可调整）后返回
+
+### Echo 服务器
+GET wss://echo.websocket.org/events
+// @websocket
+// @timeout 3000
+
+{"type": "ping"}
+
+> {%
+    client.test("WebSocket 握手成功", function () {
+        client.assert(response.status === 101, "期望 101，实际 " + response.status);
+    });
+%}

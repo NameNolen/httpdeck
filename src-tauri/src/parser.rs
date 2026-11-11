@@ -618,6 +618,7 @@ fn parse_option_directive(line: &str, builder: &mut RequestBuilder) {
         "@no-cookie-jar" => builder.options.no_cookie_jar = true,
         "@no-log" => builder.options.no_log = true,
         "@no-ssl-verification" => builder.options.accept_invalid_certs = true,
+        "@websocket" => builder.options.websocket = true,
         "@timeout" => {
             if let Some(value) = parts.next() {
                 builder.options.timeout_ms = value.parse::<u64>().ok();

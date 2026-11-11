@@ -245,3 +245,68 @@ Authorization: Bearer {{token}}
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
+
+#[tokio::test]
+async fn websocket_sends_body_and_collects_frames() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    // echo 服务器：收到文本帧后回两条帧（echo + bye），然后关闭
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = ws.next().await {
+            if let Message::Text(text) = message {
+                ws.send(Message::text(format!("echo: {text}")))
+                    .await
+                    .unwrap();
+                ws.send(Message::text("bye")).await.unwrap();
+                let _ = ws.close(None).await;
+                break;
+            }
+        }
+    });
+
+    let content = r#"
+### ws echo
+GET ws://127.0.0.1:__PORT__/echo
+// @websocket
+// @timeout 3000
+
+hello ws
+"#
+    .replace("__PORT__", &port.to_string());
+
+    let parsed = parser::parse(&content);
+    assert_eq!(parsed.requests.len(), 1);
+    assert!(parsed.requests[0].options.websocket);
+
+    let mut globals = HashMap::new();
+    let base_dir = temp_workspace();
+    let result = execute_request(
+        &parsed.requests[0],
+        &HashMap::new(),
+        &HashMap::new(),
+        &mut globals,
+        Arc::new(SharedCookieStore::new()),
+        &base_dir,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.status, 101, "{:?}", result.error);
+    assert!(result.error.is_none(), "{:?}", result.error);
+    assert!(result.body.contains("echo: hello ws"), "body: {}", result.body);
+    assert!(result.body.contains("bye"), "body: {}", result.body);
+    assert!(
+        result.logs.iter().any(|log| log.contains("已发送 WebSocket 消息")),
+        "logs: {:?}",
+        result.logs
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}

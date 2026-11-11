@@ -27,6 +27,12 @@ base64 = "0.22"
 encoding_rs = "0.8"
 url = "2"
 regex = "1"
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
 
 [profile.release]
 panic = "abort"
