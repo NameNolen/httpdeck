@@ -1,4 +1,4 @@
-﻿use crate::cookies::SharedCookieStore;
+use crate::cookies::SharedCookieStore;
 use crate::models::{KeyValue, RequestResult};
 use crate::parser::{BodySpec, RequestDef, SaveSpec, ScriptSpec};
 use crate::script::{self, ScriptRequest, ScriptResponse};
