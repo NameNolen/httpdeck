@@ -6,7 +6,50 @@
 
 ---
 
-## 功能列表
+> **本分支（`explore/native-ui`）**：在 main 基础上新增 **`src-egui`** —— 用 **eframe / egui 0.37** 重写的原生 UI 层，探索替代 Tauri + WebView2 的方案。HTTP 解析、变量替换、脚本运行时、请求执行等核心逻辑全部复用 `src-tauri` 的 `httpdeck` core，未做改动。
+
+## egui 原生 UI（本分支新增）
+
+动机：WebView2 方案进程多、内存占用高。egui 版为**单进程、无 WebView2 Runtime 依赖**的纯原生应用，release 单文件约 **8.3 MB**。
+
+构建与运行（无需 Node.js）：
+
+```powershell
+cargo build --release -p httpdeck-egui
+.\target\release\httpdeck-egui.exe
+```
+
+布局与 Tauri 版一致：工具栏（打开目录 / 环境切换 / 运行 / 保存）、左侧目录树、右侧请求列表、底部响应面板、中央编辑器。
+
+已实现：
+
+- 打开目录并自动恢复最近工作区，目录树折叠、整行点击打开 `.http` 文件
+- 自研 `.http` 语法高亮与行号，CJK 字体回退（simhei / msyh / simsun）
+- `Ctrl+F` 查找、`Ctrl+H` 替换，支持循环跳转、当前替换与全部替换
+- 文件右键菜单：新建、重命名、删除、另存为、复制；文件置顶及侧栏“置顶常用”持久化
+- 环境选择（读取 `http-client.env.json` / `http-client.private.env.json`）
+- 运行选中请求 / 运行整个文件（tokio 异步执行，不阻塞 UI）
+- 响应面板：状态码 / 耗时 / 大小 / MIME，响应体 / 响应头 / 测试 / 控制台 / 实际请求五个视图，JSON 美化与原始文本切换
+- 快捷键 `Ctrl+S` 保存、`Ctrl+Enter` 运行选中请求
+- 面板可拖拽调整大小，默认最大化窗口（避免高 DPI 下窗口超出屏幕）
+
+尚未实现（Tauri 版已有，后续补齐）：
+
+- 多标签、`client.global` 查看器
+- 历史记录面板、MCP 状态面板、目录级批量运行、网络设置（代理 / mTLS）界面
+
+测试：
+
+```powershell
+# 无头 UI 与单元测试：布局、查找替换、文件操作、置顶、响应面板等
+cargo test -p httpdeck-egui
+```
+
+> 实测提示：egui 0.37 的 `Panel` 按内容收缩，侧边 / 底部面板需在内容开头调用 `ui.take_available_space()`，否则面板会塌陷不可见。
+
+---
+
+## 功能列表（core，两个 UI 共用）
 
 ### 1. HTTP 客户端
 
@@ -129,6 +172,7 @@
 | 层 | 技术 |
 | --- | --- |
 | 桌面框架 | Tauri 2 |
+| 原生 UI（本分支新增） | eframe / egui 0.37（glow 后端，自研 `.http` 语法高亮） |
 | 后端 | Rust（tokio、reqwest、rquickjs / QuickJS、serde） |
 | 前端 | React 18 + TypeScript + Vite |
 | 编辑器 | CodeMirror 6（自定义 `.http` 语法高亮） |
@@ -226,6 +270,13 @@ httpdeck/
 │     ├─ recent.rs          # 历史目录记录（%APPDATA%\HttpDeck\recent.json）
 │     ├─ models.rs
 │     └─ lib.rs             # Tauri 命令注册
+├─ src-tauri-mcp/           # 独立 MCP Server 可执行文件
+├─ src-egui/                # 本分支新增：egui 原生 UI（复用 src-tauri 的 core）
+│  └─ src/
+│     ├─ main.rs            # 入口、CJK 字体加载、窗口配置
+│     ├─ app.rs             # 主界面布局、异步任务、快捷键、布局测试
+│     ├─ tree.rs            # 目录树渲染
+│     └─ response.rs        # 响应面板
 └─ examples/                # 可打开的示例工作区
 ```
 

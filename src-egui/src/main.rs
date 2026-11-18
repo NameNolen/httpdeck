@@ -7,6 +7,12 @@ mod tree;
 use std::sync::Arc;
 
 fn main() -> eframe::Result<()> {
+    // GUI 子系统下看不到 panic 输出，写入临时日志便于排查
+    std::panic::set_hook(Box::new(|info| {
+        let log = std::env::temp_dir().join("httpdeck-egui-panic.log");
+        let _ = std::fs::write(log, format!("{info}\n"));
+    }));
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
