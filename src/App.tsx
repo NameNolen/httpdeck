@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   api,
   type CookieInfo,
@@ -398,6 +398,36 @@ export default function App() {
     },
     [workspaces, activeRoot, openFile]
   );
+
+  // 在原地复制一份文件，命名为「原文件名 + 序号」
+  const duplicateFile = async (root: string, node: FileNode) => {
+    try {
+      const [info, path] = await api.duplicateHttpFile(root, node.path);
+      upsertWorkspace(info);
+      await openFile({
+        name: basename(path),
+        path,
+        relPath: relOf(root, path),
+        isDir: false,
+        children: [],
+      });
+      setNotice({ kind: "info", message: `已复制为 ${basename(path)}` });
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  };
+
+  // 另存为：把源文件复制到用户选择的位置
+  const saveFileAs = async (_root: string, node: FileNode) => {
+    try {
+      const target = await save({ defaultPath: node.name });
+      if (!target) return;
+      await api.exportHttpFile(node.path, target);
+      setNotice({ kind: "info", message: `已另存为 ${basename(target)}` });
+    } catch (err) {
+      setNotice({ kind: "error", message: errText(err) });
+    }
+  };
 
   const clearRecent = async () => {
     if (!workspace) return;
@@ -1005,6 +1035,8 @@ export default function App() {
           onRenameFile={(root, node) =>
             setFileDialog({ kind: "rename", root, path: node.path, value: node.name })
           }
+          onDuplicateFile={(root, node) => void duplicateFile(root, node)}
+          onSaveFileAs={(root, node) => void saveFileAs(root, node)}
           onDeleteFile={(root, node) =>
             setFileDialog({ kind: "delete", root, path: node.path })
           }

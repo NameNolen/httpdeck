@@ -125,6 +125,10 @@ export const api = {
     invoke<[WorkspaceInfo, string]>("create_http_file", { workspace, parent, name }),
   renameHttpFile: (workspace: string, file: string, name: string) =>
     invoke<[WorkspaceInfo, string]>("rename_http_file", { workspace, file, name }),
+  duplicateHttpFile: (workspace: string, file: string) =>
+    invoke<[WorkspaceInfo, string]>("duplicate_http_file", { workspace, file }),
+  exportHttpFile: (source: string, target: string) =>
+    invoke<void>("export_http_file", { source, target }),
   deleteHttpFile: (workspace: string, file: string) =>
     invoke<WorkspaceInfo>("delete_http_file", { workspace, file }),
   listRecentFiles: (workspace: string) =>

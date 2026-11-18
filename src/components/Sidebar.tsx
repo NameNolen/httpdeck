@@ -17,6 +17,8 @@ interface Props {
   onRunFolder: (root: string, node: FileNode) => void;
   onCreateFile: (root: string, parent: string) => void;
   onRenameFile: (root: string, node: FileNode) => void;
+  onDuplicateFile: (root: string, node: FileNode) => void;
+  onSaveFileAs: (root: string, node: FileNode) => void;
   onDeleteFile: (root: string, node: FileNode) => void;
   recentFiles: string[];
   onOpenRecent: (path: string) => void;
@@ -72,6 +74,8 @@ export function Sidebar({
   onRunFolder,
   onCreateFile,
   onRenameFile,
+  onDuplicateFile,
+  onSaveFileAs,
   onDeleteFile,
   recentFiles,
   onOpenRecent,
@@ -160,7 +164,7 @@ export function Sidebar({
                 y: event.clientY,
               });
             }}
-            title={node.path}
+            title={`${node.path}\n单击或右键可折叠目录`}
           >
             <span className={`chevron ${isCollapsed ? "collapsed" : ""}`}>▸</span>
             <span className="folder-icon">▣</span>
@@ -428,6 +432,15 @@ export function Sidebar({
                 onClick={() => {
                   const target = menu;
                   setMenu(null);
+                  toggleGroup(target.root);
+                }}
+              >
+                {collapsedGroups.has(menu.root) ? "展开目录树" : "折叠目录树"}
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu;
+                  setMenu(null);
                   onCreateFile(target.root, target.root);
                 }}
               >
@@ -455,6 +468,20 @@ export function Sidebar({
             </>
           ) : menu.kind === "folder" ? (
             <>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "folder" }>;
+                  setMenu(null);
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(target.node.path)) next.delete(target.node.path);
+                    else next.add(target.node.path);
+                    return next;
+                  });
+                }}
+              >
+                {collapsed.has(menu.node.path) ? "展开此目录" : "折叠此目录"}
+              </button>
               <button
                 onClick={() => {
                   const target = menu as Extract<MenuState, { kind: "folder" }>;
@@ -512,6 +539,24 @@ export function Sidebar({
                 }}
               >
                 在资源管理器中打开
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
+                  setMenu(null);
+                  onSaveFileAs(target.root, target.node);
+                }}
+              >
+                另存为…
+              </button>
+              <button
+                onClick={() => {
+                  const target = menu as Extract<MenuState, { kind: "file" }>;
+                  setMenu(null);
+                  onDuplicateFile(target.root, target.node);
+                }}
+              >
+                复制文件（同名 +1）
               </button>
               <button
                 onClick={() => {

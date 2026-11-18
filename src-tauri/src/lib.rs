@@ -406,6 +406,69 @@ fn rename_http_file(
     Ok((info, target.to_string_lossy().to_string()))
 }
 
+/// 生成「同名 + 序号」的不重复路径：api.http -> api1.http -> api2.http
+fn duplicate_target(source: &Path) -> Result<PathBuf, String> {
+    let dir = source
+        .parent()
+        .ok_or_else(|| "无法确定文件所在目录".to_string())?;
+    let stem = source
+        .file_stem()
+        .and_then(|item| item.to_str())
+        .unwrap_or("file");
+    let ext = source
+        .extension()
+        .map(|item| format!(".{}", item.to_string_lossy()))
+        .unwrap_or_default();
+    // 已经没有序号的文件从 1 开始，已有序号的文件在其序号上递增
+    let (base, start) = match stem.rfind(|c: char| !c.is_ascii_digit()) {
+        Some(index) => {
+            let (prefix, digits) = stem.split_at(index + 1);
+            match digits.parse::<u32>() {
+                Ok(number) => (prefix.to_string(), number + 1),
+                Err(_) => (stem.to_string(), 1),
+            }
+        }
+        None => (stem.to_string(), 1),
+    };
+    let mut number = start.max(1);
+    loop {
+        let candidate = dir.join(format!("{base}{number}{ext}"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        number += 1;
+    }
+}
+
+#[tauri::command]
+fn duplicate_http_file(
+    state: State<'_, AppState>,
+    workspace: String,
+    file: String,
+) -> Result<(WorkspaceInfo, String), String> {
+    let root = canonical_root(&workspace)?;
+    let source = PathBuf::from(&file);
+    if !source.is_file() {
+        return Err(format!("文件不存在: {file}"));
+    }
+    let target = duplicate_target(&source)?;
+    std::fs::copy(&source, &target)
+        .map_err(|e| format!("复制文件失败 {}: {e}", target.display()))?;
+    let info = build_workspace_info(&state, &root)?;
+    Ok((info, target.to_string_lossy().to_string()))
+}
+
+/// 另存为：把源文件原样复制到指定位置
+#[tauri::command]
+fn export_http_file(source: String, target: String) -> Result<(), String> {
+    let src = PathBuf::from(&source);
+    if !src.is_file() {
+        return Err(format!("文件不存在: {source}"));
+    }
+    std::fs::copy(&src, &target).map_err(|e| format!("另存为失败: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn delete_http_file(
     state: State<'_, AppState>,
@@ -929,6 +992,8 @@ pub fn run() {
             save_http_file,
             create_http_file,
             rename_http_file,
+            duplicate_http_file,
+            export_http_file,
             delete_http_file,
             parse_http_file,
             parse_http_text,
