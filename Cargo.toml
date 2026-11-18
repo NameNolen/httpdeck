@@ -1,3 +1,10 @@
 [workspace]
-members = ["src-tauri", "src-tauri-mcp"]
+members = ["src-tauri", "src-tauri-mcp", "src-egui"]
 resolver = "2"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

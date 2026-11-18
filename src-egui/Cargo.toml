@@ -1,0 +1,23 @@
+[package]
+name = "httpdeck-egui"
+version = "0.1.0"
+description = "HttpDeck 原生 UI（egui）"
+edition = "2021"
+
+[[bin]]
+name = "httpdeck-egui"
+path = "src/main.rs"
+
+[dependencies]
+httpdeck = { path = "../src-tauri" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+rfd = "0.15"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+] }
+egui = "0.37.0"
