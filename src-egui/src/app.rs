@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use httpdeck_lib::models::{FileNode, RequestResult, RequestSummary};
+use httpdeck_lib::models::{FileNode, HistoryEntry, RequestResult, RequestSummary};
 use httpdeck_lib::parser::{self, ParsedHttpFile};
-use httpdeck_lib::{recent, workspace};
+use httpdeck_lib::{history, recent, workspace};
 
 use crate::{response, tree};
 
@@ -26,6 +26,13 @@ enum FileDialog {
     Rename { path: PathBuf, name: String },
     SaveAs { path: PathBuf, target: String },
     Delete { path: PathBuf },
+}
+
+/// 右侧面板当前显示请求列表还是执行历史
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestsTab {
+    Requests,
+    History,
 }
 
 /// 一个已打开文件的标签；切换标签时用它保存 / 恢复编辑器状态
@@ -52,6 +59,10 @@ pub struct HttpDeckApp {
     /// 已打开的文件标签，`active_tab` 指向当前显示的那个
     tabs: Vec<Tab>,
     active_tab: Option<usize>,
+    requests_tab: RequestsTab,
+    /// 当前工作区的请求历史（新的在前）
+    history: Vec<HistoryEntry>,
+    history_search: String,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -95,6 +106,9 @@ impl HttpDeckApp {
             pinned: Vec::new(),
             tabs: Vec::new(),
             active_tab: None,
+            requests_tab: RequestsTab::Requests,
+            history: Vec::new(),
+            history_search: String::new(),
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -154,6 +168,7 @@ impl HttpDeckApp {
         self.dirty = false;
         self.error = None;
         self.status = "工作区已加载".to_owned();
+        self.refresh_history();
     }
 
     fn load_file(&mut self, path: PathBuf) {
@@ -386,7 +401,9 @@ impl HttpDeckApp {
     }
 
     fn poll_tasks(&mut self, ctx: &egui::Context) {
+        let mut received = false;
         while let Ok(message) = self.rx.try_recv() {
+            received = true;
             self.running = self.running.saturating_sub(1);
             match message {
                 TaskMsg::Done { path, result } => match result {
@@ -413,6 +430,9 @@ impl HttpDeckApp {
                     }
                 },
             }
+        }
+        if received {
+            self.refresh_history();
         }
         if self.running > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -592,6 +612,58 @@ impl HttpDeckApp {
         // 多标签下允许直接切换，未保存内容保留在原标签中
         self.load_file(path);
         self.jump_to_request(ctx, index);
+    }
+
+    /// 从磁盘重新载入工作区请求历史
+    fn refresh_history(&mut self) {
+        self.history = match &self.root {
+            Some(root) => history::list(root),
+            None => Vec::new(),
+        };
+    }
+
+    fn clear_history(&mut self) {
+        if let Some(root) = &self.root {
+            history::clear(root);
+        }
+        self.refresh_history();
+        self.status = "已清空请求历史".to_owned();
+    }
+
+    /// 打开历史对应的文件并选中该请求；失败时返回 false
+    fn open_history_entry(&mut self, entry: &HistoryEntry) -> bool {
+        let Some(root) = self.root.clone() else {
+            return false;
+        };
+        let path = PathBuf::from(&entry.file);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        if !path.is_file() {
+            self.error = Some(format!("历史文件不存在: {}", path.display()));
+            return false;
+        }
+        self.load_file(path);
+        let count = self
+            .parsed
+            .as_ref()
+            .map_or(0, |parsed| parsed.requests.len());
+        if entry.request_index >= count {
+            self.error = Some("历史对应的请求已不存在".to_owned());
+            return false;
+        }
+        self.selected_request = Some(entry.request_index);
+        self.error = None;
+        true
+    }
+
+    /// 重新发送历史中的请求
+    fn rerun_history(&mut self, ctx: &egui::Context, entry: &HistoryEntry) {
+        if self.open_history_entry(entry) {
+            self.run_selected(ctx);
+        }
     }
 
     /// 把编辑区光标移到指定字符位置，并滚动到可见区域
@@ -1018,38 +1090,114 @@ impl HttpDeckApp {
             .default_size(240.0)
             .show(root, |ui| {
                 ui.take_available_space();
-                ui.strong("请求");
-                ui.separator();
-                let ctx = ui.ctx().clone();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut clicked = None;
-                    if let Some(parsed) = &self.parsed {
-                        if parsed.requests.is_empty() {
-                            ui.weak("当前文件没有可执行请求");
-                        }
-                        for (index, request) in parsed.requests.iter().enumerate() {
-                            let mut text =
-                                format!("{}  {}", request.method, request.display_name());
-                            if let Some(result) = self.results.get(&index) {
-                                text.push_str(&format!("  [{}]", result.status));
-                            }
-                            if ui
-                                .selectable_label(self.selected_request == Some(index), text)
-                                .clicked()
-                            {
-                                clicked = Some(index);
-                            }
-                        }
-                    } else {
-                        ui.weak("打开 .http 文件后显示请求列表");
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.requests_tab == RequestsTab::Requests, "请求")
+                        .clicked()
+                    {
+                        self.requests_tab = RequestsTab::Requests;
                     }
-                    if let Some(index) = clicked {
-                        self.jump_to_request(&ctx, index);
+                    if ui
+                        .selectable_label(self.requests_tab == RequestsTab::History, "历史")
+                        .clicked()
+                    {
+                        self.requests_tab = RequestsTab::History;
+                        self.refresh_history();
                     }
                 });
+                ui.separator();
+                let ctx = ui.ctx().clone();
+                match self.requests_tab {
+                    RequestsTab::Requests => self.requests_list(ui, &ctx),
+                    RequestsTab::History => self.history_list(ui, &ctx),
+                }
             })
             .response
             .rect
+    }
+
+    /// 当前文件的请求列表
+    fn requests_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::ScrollArea::vertical()
+            .id_salt("requests")
+            .show(ui, |ui| {
+                let mut clicked = None;
+                if let Some(parsed) = &self.parsed {
+                    if parsed.requests.is_empty() {
+                        ui.weak("当前文件没有可执行请求");
+                    }
+                    for (index, request) in parsed.requests.iter().enumerate() {
+                        let mut text = format!("{}  {}", request.method, request.display_name());
+                        if let Some(result) = self.results.get(&index) {
+                            text.push_str(&format!("  [{}]", result.status));
+                        }
+                        if ui
+                            .selectable_label(self.selected_request == Some(index), text)
+                            .clicked()
+                        {
+                            clicked = Some(index);
+                        }
+                    }
+                } else {
+                    ui.weak("打开 .http 文件后显示请求列表");
+                }
+                if let Some(index) = clicked {
+                    self.jump_to_request(ctx, index);
+                }
+            });
+    }
+
+    /// 历史列表：支持关键字过滤，点击「重发」重新执行
+    fn history_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.history_search)
+                    .id(egui::Id::new("history_search"))
+                    .hint_text("搜索历史")
+                    .desired_width((ui.available_width() - 44.0).max(40.0)),
+            );
+            if ui
+                .small_button("清空")
+                .on_hover_text("清空历史记录")
+                .clicked()
+            {
+                self.clear_history();
+            }
+        });
+        let keyword = self.history_search.clone();
+        let items: Vec<HistoryEntry> = self
+            .history
+            .iter()
+            .filter(|entry| history_matches(entry, &keyword))
+            .cloned()
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt("history")
+            .show(ui, |ui| {
+                if items.is_empty() {
+                    ui.weak("暂无历史记录");
+                }
+                for entry in &items {
+                    let time = entry.time.get(11..19).unwrap_or(&entry.time);
+                    let status = if entry.error.is_some() {
+                        "ERR".to_owned()
+                    } else {
+                        entry.status.to_string()
+                    };
+                    let text = format!("{time}  {} {}  {}", entry.method, status, entry.name);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("重发")
+                            .on_hover_text(format!("{} {}", entry.method, entry.url))
+                            .clicked()
+                        {
+                            self.rerun_history(ctx, entry);
+                        }
+                        ui.label(text)
+                            .on_hover_text(format!("{}\n{}", entry.url, entry.time));
+                    });
+                }
+            });
     }
 
     fn response_panel(&mut self, root: &mut egui::Ui) -> egui::Rect {
@@ -1375,6 +1523,19 @@ impl eframe::App for HttpDeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
     }
+}
+
+/// 历史记录是否匹配搜索关键字（方法 / URL / 名称 / 文件 / 状态码）
+fn history_matches(entry: &HistoryEntry, keyword: &str) -> bool {
+    let keyword = keyword.trim().to_lowercase();
+    if keyword.is_empty() {
+        return true;
+    }
+    entry.method.to_lowercase().contains(&keyword)
+        || entry.url.to_lowercase().contains(&keyword)
+        || entry.name.to_lowercase().contains(&keyword)
+        || entry.file.to_lowercase().contains(&keyword)
+        || entry.status.to_string().contains(&keyword)
 }
 
 /// 文件名去空白并自动补 `.http` 后缀
@@ -2094,6 +2255,92 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_tab, Some(0));
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_history(dir: &Path, entries: &[HistoryEntry]) {
+        let store = dir.join(".http-client").join("history.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, serde_json::to_string(entries).unwrap()).unwrap();
+    }
+
+    fn sample_history(file: &Path, index: usize, name: &str, url: &str) -> HistoryEntry {
+        HistoryEntry {
+            time: "2026-11-19T10:20:30+08:00".to_owned(),
+            file: file.to_string_lossy().into_owned(),
+            request_index: index,
+            name: name.to_owned(),
+            method: "GET".to_owned(),
+            url: url.to_owned(),
+            status: 200,
+            duration_ms: 12,
+            error: None,
+        }
+    }
+
+    /// 载入工作区时读取历史，搜索关键字可过滤方法 / URL / 名称
+    #[test]
+    fn history_loads_and_filters() {
+        let (dir, a, _b) = tab_workspace("hist-filter");
+        write_history(
+            &dir,
+            &[
+                sample_history(&a, 0, "用户列表", "https://example.com/users"),
+                sample_history(&a, 1, "订单", "https://example.com/orders"),
+            ],
+        );
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        assert_eq!(app.history.len(), 2, "载入工作区应读取历史");
+
+        assert!(history_matches(&app.history[0], ""));
+        assert!(history_matches(&app.history[0], "USERS"));
+        // 文件路径本身含用户名（如 C:\\Users\\...），这里用 URL 独有的关键字做负向断言
+        assert!(!history_matches(&app.history[0], "orders"));
+        assert!(history_matches(&app.history[1], "orders"));
+        assert!(history_matches(&app.history[0], "200"));
+
+        app.history_search = "订单".to_owned();
+        let filtered: Vec<&HistoryEntry> = app
+            .history
+            .iter()
+            .filter(|entry| history_matches(entry, &app.history_search))
+            .collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "订单");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 历史重发应打开对应文件并选中请求；清空后内存与磁盘均为空
+    #[test]
+    fn history_rerun_selects_request_and_clear_works() {
+        let (dir, a, _b) = tab_workspace("hist-rerun");
+        std::fs::write(
+            &a,
+            "@host = http://127.0.0.1:1\n\n### 一\nGET {{host}}/one\n\n### 二\nGET {{host}}/two\n",
+        )
+        .unwrap();
+        let entry = sample_history(&a, 1, "二", "http://127.0.0.1:1/two");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+
+        assert!(app.open_history_entry(&entry), "历史应能定位到请求");
+        assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
+        assert_eq!(app.selected_request, Some(1));
+
+        let mut missing = entry.clone();
+        missing.request_index = 9;
+        assert!(!app.open_history_entry(&missing), "请求不存在时应失败");
+        assert!(app.error.is_some());
+
+        write_history(&dir, &[entry]);
+        app.refresh_history();
+        assert_eq!(app.history.len(), 1);
+        app.clear_history();
+        assert!(app.history.is_empty());
+        assert!(history::list(&dir).is_empty(), "清空应写入磁盘");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
