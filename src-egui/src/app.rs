@@ -75,6 +75,10 @@ pub struct HttpDeckApp {
     show_mcp: bool,
     mcp_busy: bool,
     mcp_status: Option<McpStatus>,
+    show_settings: bool,
+    settings_proxy: String,
+    settings_cert: String,
+    settings_key: String,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -125,6 +129,10 @@ impl HttpDeckApp {
             show_mcp: false,
             mcp_busy: false,
             mcp_status: None,
+            show_settings: false,
+            settings_proxy: String::new(),
+            settings_cert: String::new(),
+            settings_key: String::new(),
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -1113,6 +1121,13 @@ impl HttpDeckApp {
                         ui.spinner();
                     }
                     ui.separator();
+                    if ui
+                        .button("网络")
+                        .on_hover_text("代理与 mTLS 客户端证书")
+                        .clicked()
+                    {
+                        self.open_settings();
+                    }
                     let mcp_running = self.mcp_status.as_ref().is_some_and(|s| s.running);
                     let label = if mcp_running { "MCP ●" } else { "MCP" };
                     if ui
@@ -1673,7 +1688,112 @@ impl HttpDeckApp {
         };
         self.render_file_dialog(&ctx);
         self.mcp_window(&ctx);
+        self.settings_window(&ctx);
         rects
+    }
+
+    fn open_settings(&mut self) {
+        let config = self
+            .root
+            .as_ref()
+            .map(|root| workspace::load_config(root))
+            .unwrap_or_default();
+        self.settings_proxy = config.proxy.unwrap_or_default();
+        self.settings_cert = config.client_cert.unwrap_or_default();
+        self.settings_key = config.client_key.unwrap_or_default();
+        self.show_settings = true;
+    }
+
+    fn save_settings(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if let Some(message) = proxy_problem(&self.settings_proxy) {
+            self.error = Some(message);
+            return;
+        }
+        let optional = |value: &str| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        };
+        let mut config = workspace::load_config(&root);
+        config.proxy = optional(&self.settings_proxy);
+        config.client_cert = optional(&self.settings_cert);
+        config.client_key = optional(&self.settings_key);
+        match workspace::save_config(&root, &config) {
+            Ok(()) => {
+                self.show_settings = false;
+                self.error = None;
+                self.status = "网络设置已保存".to_owned();
+            }
+            Err(err) => self.error = Some(err),
+        }
+    }
+
+    /// 网络设置窗口：代理与 mTLS 客户端证书
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = self.show_settings;
+        egui::Window::new("网络设置")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("代理地址");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_proxy)
+                        .id(egui::Id::new("settings_proxy"))
+                        .hint_text("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080")
+                        .desired_width(360.0),
+                );
+                ui.weak("留空表示直连，支持 HTTP / SOCKS5 代理");
+                ui.separator();
+
+                ui.label("mTLS 客户端证书（PEM）");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_cert)
+                            .id(egui::Id::new("settings_cert"))
+                            .desired_width(280.0),
+                    );
+                    if ui.button("选择…").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("PEM", &["pem", "crt", "cer"])
+                            .pick_file()
+                        {
+                            self.settings_cert = file.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.label("客户端私钥（PEM，可选）");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_key)
+                            .id(egui::Id::new("settings_key"))
+                            .desired_width(280.0),
+                    );
+                    if ui.button("选择…").clicked() {
+                        if let Some(file) = rfd::FileDialog::new()
+                            .add_filter("PEM", &["pem", "key"])
+                            .pick_file()
+                        {
+                            self.settings_key = file.to_string_lossy().to_string();
+                        }
+                    }
+                });
+                ui.weak("留空表示不使用客户端证书；相对路径按工作区根目录解析");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("保存").clicked() {
+                        self.save_settings();
+                    }
+                    if ui.button("取消").clicked() {
+                        self.show_settings = false;
+                    }
+                });
+            });
+        self.show_settings = open;
     }
 
     fn refresh_mcp_status(&mut self) {
@@ -1837,6 +1957,23 @@ pub struct LayoutRects {
 impl eframe::App for HttpDeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+}
+
+/// 检查代理地址格式；空表示直连，返回错误文案
+fn proxy_problem(proxy: &str) -> Option<String> {
+    let proxy = proxy.trim();
+    if proxy.is_empty() {
+        return None;
+    }
+    let lower = proxy.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("socks5://")
+    {
+        None
+    } else {
+        Some("代理地址应以 http://、https:// 或 socks5:// 开头".to_owned())
     }
 }
 
@@ -2581,6 +2718,71 @@ mod tests {
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 网络设置应校验代理地址并持久化代理与证书路径
+    #[test]
+    fn settings_save_persists_proxy_and_cert() {
+        let (dir, _a, _b) = tab_workspace("settings");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.settings_proxy = " socks5://127.0.0.1:1080 ".to_owned();
+        app.settings_cert = "certs/client.pem".to_owned();
+        app.settings_key = "certs/client.key".to_owned();
+        app.save_settings();
+        assert!(app.error.is_none());
+
+        let config = workspace::load_config(&dir);
+        assert_eq!(config.proxy.as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert_eq!(config.client_cert.as_deref(), Some("certs/client.pem"));
+        assert_eq!(config.client_key.as_deref(), Some("certs/client.key"));
+
+        app.settings_proxy = "127.0.0.1:7890".to_owned();
+        app.save_settings();
+        assert!(app.error.is_some(), "缺少协议前缀应提示错误");
+        assert_eq!(
+            workspace::load_config(&dir).proxy.as_deref(),
+            Some("socks5://127.0.0.1:1080"),
+            "非法代理不应覆盖已保存配置"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 网络设置窗口应展示代理与 mTLS 输入项
+    #[test]
+    fn settings_window_renders_fields() {
+        let mut app = HttpDeckApp::new();
+        app.show_settings = true;
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                app.draw(ui);
+            });
+            output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(texts.iter().any(|text| text == "网络设置"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "代理地址"), "{texts:?}");
+        assert!(
+            texts.iter().any(|text| text.contains("mTLS 客户端证书")),
+            "{texts:?}"
+        );
     }
 
     /// MCP 状态窗口应展示运行状态与操作按钮
