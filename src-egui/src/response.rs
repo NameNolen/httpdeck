@@ -2,6 +2,8 @@ use egui::{Color32, RichText};
 use httpdeck_lib::models::RequestResult;
 
 const BODY_PREVIEW_LIMIT: usize = 200_000;
+/// 超过该大小关闭美化，并按行虚拟滚动
+const VIRTUAL_BODY_LIMIT: usize = 1_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ResponseTab {
@@ -118,17 +120,25 @@ pub fn ui(
         select_tab(ui, &mut tab, ResponseTab::Request, "实际请求".to_owned());
         if tab == ResponseTab::Body && !result.body_is_binary {
             ui.separator();
-            for (view, label) in [(BodyView::Pretty, "美化"), (BodyView::Raw, "原始")] {
-                if ui.selectable_label(body_view == view, label).clicked() {
-                    body_view = view;
-                }
+            let huge = result.body.len() > VIRTUAL_BODY_LIMIT;
+            if huge && body_view != BodyView::Raw {
+                body_view = BodyView::Raw;
             }
-            if body_json.is_some()
-                && ui
-                    .selectable_label(body_view == BodyView::Tree, "树形")
-                    .clicked()
-            {
-                body_view = BodyView::Tree;
+            if huge {
+                ui.weak("超大响应：已关闭美化，按行虚拟滚动");
+            } else {
+                for (view, label) in [(BodyView::Pretty, "美化"), (BodyView::Raw, "原始")] {
+                    if ui.selectable_label(body_view == view, label).clicked() {
+                        body_view = view;
+                    }
+                }
+                if body_json.is_some()
+                    && ui
+                        .selectable_label(body_view == BodyView::Tree, "树形")
+                        .clicked()
+                {
+                    body_view = BodyView::Tree;
+                }
             }
             if body_view != BodyView::Tree {
                 ui.add(
@@ -157,20 +167,26 @@ pub fn ui(
     });
     ui.separator();
 
-    egui::ScrollArea::both()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if let Some(error) = &result.error {
-                ui.colored_label(Color32::from_rgb(230, 100, 100), error);
-            }
-            if let Some(error) = &result.script_error {
-                ui.colored_label(
-                    Color32::from_rgb(230, 170, 70),
-                    format!("脚本错误：{error}"),
-                );
-            }
+    if let Some(error) = &result.error {
+        ui.colored_label(Color32::from_rgb(230, 100, 100), error);
+    }
+    if let Some(error) = &result.script_error {
+        ui.colored_label(
+            Color32::from_rgb(230, 170, 70),
+            format!("脚本错误：{error}"),
+        );
+    }
 
-            match tab {
+    // 超大响应直接按行虚拟化，避免一次性创建数万个文本控件
+    let virtual_body = tab == ResponseTab::Body
+        && body_view != BodyView::Tree
+        && result.body.len() > VIRTUAL_BODY_LIMIT;
+    if virtual_body {
+        virtual_body_view(ui, result, &search);
+    } else {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| match tab {
                 ResponseTab::Body => {
                     if result.body_is_binary {
                         ui.weak("二进制响应，以下内容为 Base64 编码");
@@ -229,8 +245,8 @@ pub fn ui(
                     }
                 }
                 ResponseTab::Request => selectable_code(ui, actual_request_text(result)),
-            }
-        });
+            });
+    }
 
     if copy_current {
         let text = match tab {
@@ -284,7 +300,42 @@ fn selectable_code(ui: &mut egui::Ui, text: String) {
     );
 }
 
+/// 超大响应：只渲染可见行，保持滚动流畅
+fn virtual_body_view(ui: &mut egui::Ui, result: &RequestResult, search: &str) {
+    let keyword = search.trim().to_lowercase();
+    let lines: Vec<&str> = if keyword.is_empty() {
+        result.body.lines().collect()
+    } else {
+        result
+            .body
+            .lines()
+            .filter(|line| line.to_lowercase().contains(&keyword))
+            .collect()
+    };
+    if !keyword.is_empty() {
+        ui.weak(format!("匹配 {} 行", lines.len()));
+    }
+    ui.weak(format!("共 {} 行，按行虚拟滚动", lines.len()));
+    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+    egui::ScrollArea::vertical()
+        .id_salt("virtual_body")
+        .auto_shrink([false, false])
+        .show_rows(ui, row_height, lines.len(), |ui, range| {
+            for line in &lines[range] {
+                ui.add(
+                    egui::Label::new(RichText::new(*line).monospace())
+                        .selectable(true)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            }
+        });
+}
+
 fn body_text(result: &RequestResult, pretty: bool) -> String {
+    // 超大响应不做美化，复制时保留完整内容
+    if result.body.len() > VIRTUAL_BODY_LIMIT {
+        return result.body.clone();
+    }
     let mut text = if pretty {
         pretty_body(result)
     } else {
@@ -735,5 +786,61 @@ mod tests {
                 .get_temp::<BodyView>(egui::Id::new("response_body_view"))
         });
         assert!(view == Some(BodyView::Raw), "点击后应切换到原始视图");
+    }
+
+    /// 超过 1 MB 的响应应关闭美化并只渲染可见行
+    #[test]
+    fn huge_body_virtualizes_and_disables_pretty() {
+        let mut result = sample_result();
+        result.body = (0..120_000)
+            .map(|index| format!("line {index}\n"))
+            .collect::<String>();
+        result.mime_type = Some("application/json".to_owned());
+        assert!(result.body.len() > VIRTUAL_BODY_LIMIT);
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(ui, Some(&result), None, &[], None);
+            },
+        );
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "超大响应：已关闭美化，按行虚拟滚动"),
+            "{texts:?}"
+        );
+        assert!(!texts.iter().any(|text| text == "美化"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "line 0"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|text| text == "line 119999"),
+            "末尾行不应被渲染（虚拟滚动）: {texts:?}"
+        );
+    }
+
+    /// 超大响应复制时不应被截断
+    #[test]
+    fn huge_body_copy_is_not_truncated() {
+        let mut result = sample_result();
+        result.body = "x".repeat(VIRTUAL_BODY_LIMIT + 10);
+        let text = super::body_text(&result, true);
+        assert_eq!(text.len(), result.body.len());
+        assert!(!text.contains("仅显示前 200 KB"));
     }
 }
