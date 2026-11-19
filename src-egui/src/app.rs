@@ -1567,6 +1567,8 @@ impl HttpDeckApp {
                 let text_left = gutter_w as i8 + 8;
 
                 let mut paint_info = None;
+                let mut cursor_char = None;
+                let mut ctrl_click_char = None;
                 let scroll_output = egui::ScrollArea::both()
                     .id_salt("editor")
                     .auto_shrink([false, false])
@@ -1587,6 +1589,10 @@ impl HttpDeckApp {
                         if out.response.changed() {
                             self.dirty = true;
                             self.reparse();
+                        }
+                        cursor_char = out.cursor_range.map(|range| range.primary.index.0);
+                        if out.response.clicked() && ui.input(|input| input.modifiers.ctrl) {
+                            ctrl_click_char = cursor_char;
                         }
                         // 查找 / 请求跳转是在 widget 运行前改的状态，TextEdit 检测不到选区变化，
                         // 不会自动滚动，这里手动把目标行滚动到可视区域中部
@@ -1669,9 +1675,84 @@ impl HttpDeckApp {
                     self.selected_request = Some(index);
                     self.run_selected(&ctx);
                 }
+
+                let ctx = ui.ctx().clone();
+                // Ctrl + 点击 {{变量}} 跳转到 @变量 定义行
+                if let Some(cursor) = ctrl_click_char {
+                    self.jump_to_variable(&ctx, cursor);
+                }
+                // 输入 {{ 前缀时展示变量补全候选
+                if let Some((start, prefix)) =
+                    cursor_char.and_then(|cursor| completion_context(&self.editor_text, cursor))
+                {
+                    let candidates = self.completion_candidates(&prefix);
+                    if !candidates.is_empty() {
+                        let mut chosen = None;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak("补全变量：");
+                            for name in candidates.iter().take(8) {
+                                if ui.small_button(name).clicked() {
+                                    chosen = Some(name.clone());
+                                }
+                            }
+                        });
+                        if let Some(name) = chosen {
+                            let end = start + prefix.chars().count();
+                            let cursor = self.insert_completion(start, end, &name);
+                            self.jump_to_char(&ctx, cursor);
+                        }
+                    }
+                }
             })
             .response
             .rect
+    }
+
+    /// 变量补全候选：当前文件的 @变量 与 client.global 名称
+    fn completion_candidates(&self, prefix: &str) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        if let Some(parsed) = &self.parsed {
+            names.extend(parsed.variables.iter().map(|(name, _)| name.clone()));
+        }
+        names.extend(self.globals.iter().map(|item| item.name.clone()));
+        names.sort();
+        names.dedup();
+        names.retain(|name| name.starts_with(prefix) && name != prefix);
+        names
+    }
+
+    /// 把 [start, end) 的补全前缀替换为变量名并补全 `}}`，返回新光标位置
+    fn insert_completion(&mut self, start: usize, end: usize, name: &str) -> usize {
+        let chars: Vec<char> = self.editor_text.chars().collect();
+        let start = start.min(chars.len());
+        let end = end.min(chars.len());
+        let rest: String = chars[end..].iter().collect();
+        let suffix = if rest.starts_with("}}") { "" } else { "}}" };
+        let mut next: String = chars[..start].iter().collect();
+        next.push_str(name);
+        next.push_str(suffix);
+        next.extend(chars[end..].iter());
+        self.editor_text = next;
+        self.dirty = true;
+        self.reparse();
+        start + name.chars().count() + suffix.chars().count()
+    }
+
+    /// 跳转到当前文件中 `@name` 的定义行
+    fn jump_to_variable(&mut self, ctx: &egui::Context, cursor: usize) {
+        let Some(name) = variable_at(&self.editor_text, cursor) else {
+            self.error = Some("光标不在 {{变量}} 上".to_owned());
+            return;
+        };
+        match variable_definition_line(&self.editor_text, &name) {
+            Some(line) => {
+                let index = line_start_char(&self.editor_text, line);
+                self.jump_to_char(ctx, index);
+                self.error = None;
+                self.status = format!("跳转到变量 @{name}");
+            }
+            None => self.error = Some(format!("未在当前文件找到 @{name} 的定义")),
+        }
     }
 
     /// 绘制整个界面，返回各区域实际矩形（便于测试布局）
@@ -2107,6 +2188,88 @@ fn line_start_char(text: &str, line: usize) -> usize {
         chars += row.chars().count();
     }
     chars
+}
+
+/// 光标是否处在未完成的 `{{prefix` 中，返回（前缀起始字符索引，前缀）
+fn completion_context(text: &str, cursor: usize) -> Option<(usize, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let mut start = None;
+    let mut index = cursor;
+    while index > 0 {
+        index -= 1;
+        match chars[index] {
+            '\n' | '}' => return None,
+            '{' => {
+                if index > 0 && chars[index - 1] == '{' {
+                    start = Some(index + 1);
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    let start = start?;
+    let prefix: String = chars[start..cursor].iter().collect();
+    if prefix.contains(['{', '}', ' ', '\t']) {
+        return None;
+    }
+    Some((start, prefix))
+}
+
+/// 找到光标所在的 `{{变量}}` 名称（忽略过滤器，如 `{{host | default}}`）
+fn variable_at(text: &str, cursor: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let line_start = chars[..cursor]
+        .iter()
+        .rposition(|ch| *ch == '\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = chars[cursor..]
+        .iter()
+        .position(|ch| *ch == '\n')
+        .map(|offset| cursor + offset)
+        .unwrap_or(chars.len());
+    let line = &chars[line_start..line_end];
+    let offset = cursor - line_start;
+    let mut index = 0;
+    while index + 1 < line.len() {
+        if line[index] == '{' && line[index + 1] == '{' {
+            if let Some(rel_end) = line[index + 2..].iter().position(|ch| *ch == '}') {
+                let close = index + 2 + rel_end;
+                if line.get(close + 1) == Some(&'}') {
+                    if offset >= index && offset <= close + 2 {
+                        let name: String = line[index + 2..close].iter().collect();
+                        let name = name.split('|').next().unwrap_or("").trim();
+                        if !name.is_empty() {
+                            return Some(name.to_owned());
+                        }
+                    }
+                    index = close + 2;
+                    continue;
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// 变量 `@name = ...` 定义所在行号（1 起）
+fn variable_definition_line(text: &str, name: &str) -> Option<usize> {
+    for (index, line) in text.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix('@') else {
+            continue;
+        };
+        let Some((key, _)) = rest.split_once('=') else {
+            continue;
+        };
+        if key.trim() == name {
+            return Some(index + 1);
+        }
+    }
+    None
 }
 
 /// 读取 `http-client.env.json` / `http-client.private.env.json` 中的环境名
@@ -2718,6 +2881,80 @@ mod tests {
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 输入 `{{` 前缀时应识别补全上下文，闭合后不再补全
+    #[test]
+    fn completion_context_detects_prefix() {
+        let text = "GET {{ho";
+        assert_eq!(
+            completion_context(text, text.chars().count()),
+            Some((6, "ho".to_owned()))
+        );
+        let closed = "GET {{host}}";
+        assert_eq!(completion_context(closed, closed.chars().count()), None);
+        assert_eq!(completion_context("GET {", 6), None);
+        assert_eq!(completion_context("{{ us", 5), None);
+    }
+
+    /// Ctrl+点击定位变量名，并找到 @变量 定义行
+    #[test]
+    fn variable_lookup_and_definition() {
+        let text = "GET {{host}}/api";
+        assert_eq!(variable_at(text, 7), Some("host".to_owned()));
+        assert_eq!(
+            variable_at("GET {{host | default('x')}}", 8),
+            Some("host".to_owned())
+        );
+        assert_eq!(variable_at(text, 0), None);
+
+        let file = "### 一\n@host = http://x\nGET {{host}}\n@token=abc\n";
+        assert_eq!(variable_definition_line(file, "host"), Some(2));
+        assert_eq!(variable_definition_line(file, "token"), Some(4));
+        assert_eq!(variable_definition_line(file, "missing"), None);
+    }
+
+    /// 补全写入变量名与 `}}`，已有闭合时不重复添加
+    #[test]
+    fn completion_inserts_variable_and_marks_dirty() {
+        let mut app = HttpDeckApp::new();
+        app.editor_text = "GET {{ho".to_owned();
+        app.reparse();
+        let cursor = app.insert_completion(6, 8, "host");
+        assert_eq!(app.editor_text, "GET {{host}}");
+        assert!(app.dirty);
+        assert_eq!(cursor, app.editor_text.chars().count());
+
+        app.editor_text = "GET {{ho}}".to_owned();
+        app.reparse();
+        let cursor = app.insert_completion(6, 8, "host");
+        assert_eq!(app.editor_text, "GET {{host}}");
+        assert_eq!(cursor, 10);
+    }
+
+    /// 补全候选来自文件变量与 client.global，前缀匹配且排除已完整输入的名称
+    #[test]
+    fn completion_candidates_match_prefix() {
+        let mut app = HttpDeckApp::new();
+        app.editor_text = "@host = http://x\n@hostname = y\nGET {{ho".to_owned();
+        app.reparse();
+        assert_eq!(
+            app.completion_candidates("ho"),
+            vec!["host".to_owned(), "hostname".to_owned()]
+        );
+        assert_eq!(
+            app.completion_candidates("host"),
+            vec!["hostname".to_owned()]
+        );
+
+        app.globals = vec![KeyValue {
+            name: "hostGlobal".to_owned(),
+            value: "z".to_owned(),
+        }];
+        assert_eq!(
+            app.completion_candidates("host"),
+            vec!["hostGlobal".to_owned(), "hostname".to_owned()]
+        );
     }
 
     /// 网络设置应校验代理地址并持久化代理与证书路径
