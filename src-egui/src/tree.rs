@@ -66,7 +66,11 @@ pub fn render_file(
     } else {
         node.name.clone()
     };
-    let response = ui.add_sized(size, egui::Button::selectable(is_selected, label));
+    // 右侧加一个占满剩余空间的 Atom，让文件名始终靠左，而不是按钮默认居中
+    let response = ui.add_sized(
+        size,
+        egui::Button::selectable(is_selected, (label, egui::Atom::grow())),
+    );
     if response.clicked() {
         *open = Some(PathBuf::from(&node.path));
     }
