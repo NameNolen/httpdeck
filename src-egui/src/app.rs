@@ -10,8 +10,14 @@ use httpdeck_lib::{recent, workspace};
 use crate::{response, tree};
 
 enum TaskMsg {
-    Done(Result<RequestResult, String>),
-    FileDone(Result<Vec<RequestResult>, String>),
+    Done {
+        path: String,
+        result: Result<RequestResult, String>,
+    },
+    FileDone {
+        path: String,
+        result: Result<Vec<RequestResult>, String>,
+    },
 }
 
 /// 文件操作对话框（右键菜单触发）
@@ -20,6 +26,15 @@ enum FileDialog {
     Rename { path: PathBuf, name: String },
     SaveAs { path: PathBuf, target: String },
     Delete { path: PathBuf },
+}
+
+/// 一个已打开文件的标签；切换标签时用它保存 / 恢复编辑器状态
+struct Tab {
+    path: PathBuf,
+    text: String,
+    dirty: bool,
+    selected_request: Option<usize>,
+    results: HashMap<usize, RequestResult>,
 }
 
 pub struct HttpDeckApp {
@@ -34,6 +49,9 @@ pub struct HttpDeckApp {
     selected_env: Option<String>,
     pinned: Vec<String>,
 
+    /// 已打开的文件标签，`active_tab` 指向当前显示的那个
+    tabs: Vec<Tab>,
+    active_tab: Option<usize>,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -75,6 +93,8 @@ impl HttpDeckApp {
             envs: Vec::new(),
             selected_env: None,
             pinned: Vec::new(),
+            tabs: Vec::new(),
+            active_tab: None,
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -124,6 +144,8 @@ impl HttpDeckApp {
         self.selected_env = selected_env;
         self.pinned = workspace::valid_pinned(&dir, &config.pinned);
         self.root = Some(dir);
+        self.tabs.clear();
+        self.active_tab = None;
         self.open_file = None;
         self.editor_text.clear();
         self.parsed = None;
@@ -135,15 +157,27 @@ impl HttpDeckApp {
     }
 
     fn load_file(&mut self, path: PathBuf) {
+        // 文件已在某个标签中打开时直接切换，避免重复读取覆盖未保存内容
+        if let Some(index) = self.tabs.iter().position(|tab| tab.path == path) {
+            self.activate_tab(index);
+            return;
+        }
         match std::fs::read_to_string(&path) {
             Ok(text) => {
+                self.sync_active_tab();
+                let parsed = parser::parse(&text);
+                let has_requests = !parsed.requests.is_empty();
+                self.tabs.push(Tab {
+                    path: path.clone(),
+                    text: text.clone(),
+                    dirty: false,
+                    selected_request: has_requests.then_some(0),
+                    results: HashMap::new(),
+                });
+                self.active_tab = Some(self.tabs.len() - 1);
                 self.editor_text = text;
-                self.parsed = Some(parser::parse(&self.editor_text));
+                self.parsed = Some(parsed);
                 self.open_file = Some(path);
-                let has_requests = self
-                    .parsed
-                    .as_ref()
-                    .is_some_and(|parsed| !parsed.requests.is_empty());
                 self.selected_request = has_requests.then_some(0);
                 self.results.clear();
                 self.dirty = false;
@@ -152,6 +186,59 @@ impl HttpDeckApp {
             }
             Err(err) => self.error = Some(format!("读取失败: {err}")),
         }
+    }
+
+    /// 把当前编辑器状态写回它所属的标签
+    fn sync_active_tab(&mut self) {
+        let Some(index) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        tab.text = self.editor_text.clone();
+        tab.dirty = self.dirty;
+        tab.selected_request = self.selected_request;
+        tab.results = self.results.clone();
+    }
+
+    /// 切换到第 index 个标签，恢复该标签的文本、修改状态与运行结果
+    fn activate_tab(&mut self, index: usize) {
+        if self.active_tab == Some(index) {
+            return;
+        }
+        self.sync_active_tab();
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let text = tab.text.clone();
+        let path = tab.path.clone();
+        let selected = tab.selected_request;
+        let results = tab.results.clone();
+        let dirty = tab.dirty;
+        self.active_tab = Some(index);
+        self.parsed = Some(parser::parse(&text));
+        self.editor_text = text;
+        self.open_file = Some(path);
+        self.selected_request = selected.or_else(|| {
+            self.parsed
+                .as_ref()
+                .is_some_and(|parsed| !parsed.requests.is_empty())
+                .then_some(0)
+        });
+        if let Some(index) = self.selected_request {
+            let count = self
+                .parsed
+                .as_ref()
+                .map_or(0, |parsed| parsed.requests.len());
+            if index >= count {
+                self.selected_request = count.checked_sub(1);
+            }
+        }
+        self.results = results;
+        self.dirty = dirty;
+        self.scroll_to_char = None;
+        self.error = None;
     }
 
     fn reparse(&mut self) {
@@ -193,6 +280,11 @@ impl HttpDeckApp {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let closed = self.active_tab;
+        if let Some(index) = closed {
+            self.tabs.remove(index);
+        }
+        self.active_tab = None;
         self.open_file = None;
         self.editor_text.clear();
         self.parsed = None;
@@ -200,11 +292,52 @@ impl HttpDeckApp {
         self.results.clear();
         self.scroll_to_char = None;
         self.error = None;
+        // 关闭后优先激活相邻标签
+        if !self.tabs.is_empty() {
+            let next = closed.unwrap_or(0).min(self.tabs.len() - 1);
+            self.activate_tab(next);
+        }
         self.status = if name.is_empty() {
             "文件已关闭".to_owned()
         } else {
             format!("已关闭 {name}")
         };
+    }
+
+    /// 文件被删除 / 改名后同步标签路径；`None` 表示删除并关闭对应标签
+    fn update_tab_path(&mut self, old: &Path, new: Option<PathBuf>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.path == old) else {
+            return;
+        };
+        match new {
+            Some(path) => {
+                if self.active_tab == Some(index) {
+                    self.open_file = Some(path.clone());
+                }
+                self.tabs[index].path = path;
+            }
+            None => {
+                let was_active = self.active_tab == Some(index);
+                self.tabs.remove(index);
+                if was_active {
+                    self.active_tab = None;
+                    self.open_file = None;
+                    self.editor_text.clear();
+                    self.parsed = None;
+                    self.selected_request = None;
+                    self.results.clear();
+                    self.dirty = false;
+                    if !self.tabs.is_empty() {
+                        let next = index.min(self.tabs.len() - 1);
+                        self.activate_tab(next);
+                    }
+                } else if let Some(active) = self.active_tab {
+                    if index < active {
+                        self.active_tab = Some(active - 1);
+                    }
+                }
+            }
+        }
     }
 
     fn run_selected(&mut self, ctx: &egui::Context) {
@@ -227,7 +360,7 @@ impl HttpDeckApp {
             let file = file.to_string_lossy().to_string();
             let result =
                 httpdeck_lib::run_single_request(&state, &root, &file, index, env.as_deref()).await;
-            let _ = tx.send(TaskMsg::Done(result));
+            let _ = tx.send(TaskMsg::Done { path: file, result });
             ctx.request_repaint();
         });
     }
@@ -247,7 +380,7 @@ impl HttpDeckApp {
             let root = root.to_string_lossy().to_string();
             let file = file.to_string_lossy().to_string();
             let result = httpdeck_lib::run_http_file(&state, &root, &file, env.as_deref()).await;
-            let _ = tx.send(TaskMsg::FileDone(result));
+            let _ = tx.send(TaskMsg::FileDone { path: file, result });
             ctx.request_repaint();
         });
     }
@@ -256,34 +389,81 @@ impl HttpDeckApp {
         while let Ok(message) = self.rx.try_recv() {
             self.running = self.running.saturating_sub(1);
             match message {
-                TaskMsg::Done(Ok(result)) => {
-                    self.selected_request = Some(result.request_index);
-                    self.status = format!(
-                        "{} {} · {} · {} ms",
-                        result.method, result.status, result.status_text, result.duration_ms
-                    );
-                    self.error = None;
-                    self.results.insert(result.request_index, result);
-                }
-                TaskMsg::Done(Err(err)) => {
-                    self.status = "执行失败".to_owned();
-                    self.error = Some(err);
-                }
-                TaskMsg::FileDone(Ok(results)) => {
-                    self.status = format!("已执行 {} 个请求", results.len());
-                    self.error = None;
-                    for result in results {
-                        self.results.insert(result.request_index, result);
+                TaskMsg::Done { path, result } => match result {
+                    Ok(result) => {
+                        let message = format!(
+                            "{} {} · {} · {} ms",
+                            result.method, result.status, result.status_text, result.duration_ms
+                        );
+                        self.store_results(&path, vec![result], Some(&message), true);
                     }
-                }
-                TaskMsg::FileDone(Err(err)) => {
-                    self.status = "执行失败".to_owned();
-                    self.error = Some(err);
-                }
+                    Err(err) => {
+                        self.status = "执行失败".to_owned();
+                        self.error = Some(err);
+                    }
+                },
+                TaskMsg::FileDone { path, result } => match result {
+                    Ok(results) => {
+                        let message = format!("已执行 {} 个请求", results.len());
+                        self.store_results(&path, results, Some(&message), false);
+                    }
+                    Err(err) => {
+                        self.status = "执行失败".to_owned();
+                        self.error = Some(err);
+                    }
+                },
             }
         }
         if self.running > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// 把运行结果写入发起请求的文件标签；用户运行期间切换标签时结果也不会串台
+    fn store_results(
+        &mut self,
+        path: &str,
+        results: Vec<RequestResult>,
+        message: Option<&str>,
+        select_result: bool,
+    ) {
+        let selected = select_result
+            .then(|| results.last().map(|result| result.request_index))
+            .flatten();
+        let active = self
+            .open_file
+            .as_ref()
+            .is_some_and(|open| open.to_string_lossy().as_ref() == path);
+        if active {
+            if let Some(index) = selected {
+                self.selected_request = Some(index);
+            }
+            for result in results {
+                self.results.insert(result.request_index, result);
+            }
+            self.error = None;
+            if let Some(message) = message {
+                self.status = message.to_owned();
+            }
+            return;
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.path.to_string_lossy().as_ref() == path)
+        {
+            for result in results {
+                tab.results.insert(result.request_index, result);
+            }
+            self.error = None;
+            if let Some(message) = message {
+                self.status = format!("{message}（后台标签）");
+            }
+            return;
+        }
+        // 标签已关闭时结果无处可放，仅更新状态栏
+        if let Some(message) = message {
+            self.status = message.to_owned();
         }
     }
 
@@ -409,13 +589,8 @@ impl HttpDeckApp {
 
     /// 从目录树点击请求：打开对应文件并定位到该请求行
     fn open_request(&mut self, ctx: &egui::Context, path: PathBuf, index: usize) {
-        if self.open_file.as_deref() != Some(path.as_path()) {
-            if self.dirty {
-                self.error = Some("有未保存的修改，请先保存（Ctrl+S）再切换文件".to_owned());
-                return;
-            }
-            self.load_file(path);
-        }
+        // 多标签下允许直接切换，未保存内容保留在原标签中
+        self.load_file(path);
         self.jump_to_request(ctx, index);
     }
 
@@ -677,23 +852,14 @@ impl HttpDeckApp {
                 format!("已新建 {}", path.display())
             }),
             FileDialog::Rename { path, name } => rename_file(&path, &name).map(|target| {
-                if self.open_file.as_deref() == Some(path.as_path()) {
-                    self.open_file = Some(target.clone());
-                }
+                self.update_tab_path(&path, Some(target.clone()));
                 format!("已重命名为 {}", target.display())
             }),
             FileDialog::SaveAs { path, target } => {
                 save_as_file(&path, Path::new(&target)).map(|()| format!("已另存为 {target}"))
             }
             FileDialog::Delete { path } => delete_file(&path).map(|()| {
-                if self.open_file.as_deref() == Some(path.as_path()) {
-                    self.open_file = None;
-                    self.editor_text.clear();
-                    self.parsed = None;
-                    self.selected_request = None;
-                    self.results.clear();
-                    self.dirty = false;
-                }
+                self.update_tab_path(&path, None);
                 format!("已删除 {}", path.display())
             }),
         };
@@ -919,10 +1085,53 @@ impl HttpDeckApp {
     fn editor_panel(&mut self, root: &mut egui::Ui) -> egui::Rect {
         egui::CentralPanel::default()
             .show(root, |ui| {
-                let Some(path) = self.open_file.clone() else {
+                if self.open_file.is_none() {
                     ui.centered_and_justified(|ui| {
                         ui.weak("从左侧目录打开一个 .http 文件");
                     });
+                    return;
+                }
+
+                // 多标签栏：点击切换，● 标记未保存，✖ 关闭标签
+                let mut switch_tab = None;
+                let mut close_tab = None;
+                if !self.tabs.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        for (index, tab) in self.tabs.iter().enumerate() {
+                            let is_active = self.active_tab == Some(index);
+                            let dirty = if is_active { self.dirty } else { tab.dirty };
+                            let name = tab
+                                .path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("未命名");
+                            let label = if dirty {
+                                format!("{name} ●")
+                            } else {
+                                name.to_owned()
+                            };
+                            if ui
+                                .selectable_label(is_active, label)
+                                .on_hover_text(tab.path.display().to_string())
+                                .clicked()
+                            {
+                                switch_tab = Some(index);
+                            }
+                            if ui.small_button("✖").on_hover_text("关闭标签").clicked() {
+                                close_tab = Some(index);
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
+                if let Some(index) = switch_tab {
+                    self.activate_tab(index);
+                }
+                if let Some(index) = close_tab {
+                    self.activate_tab(index);
+                    self.close_file();
+                }
+                let Some(path) = self.open_file.clone() else {
                     return;
                 };
 
@@ -1787,5 +1996,105 @@ mod tests {
         assert_eq!(line_start_char(text, 2), 2);
         assert_eq!(line_start_char(text, 4), 6);
         assert_eq!(line_start_char(text, 99), text.chars().count());
+    }
+
+    fn tab_workspace(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("httpdeck-egui-tabs-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.http");
+        let b = dir.join("b.http");
+        std::fs::write(&a, "GET https://example.com/a\n").unwrap();
+        std::fs::write(&b, "GET https://example.com/b\n").unwrap();
+        (dir, a, b)
+    }
+
+    /// 打开多个文件形成标签，切换时保留各自文本与未保存状态
+    #[test]
+    fn tabs_keep_edits_when_switching() {
+        let (dir, a, b) = tab_workspace("switch");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+        app.editor_text.push_str("### 未保存\n");
+        app.dirty = true;
+        app.reparse();
+
+        app.load_file(b.clone());
+        assert_eq!(app.tabs.len(), 2, "打开第二个文件应新增标签");
+        assert_eq!(app.open_file.as_deref(), Some(b.as_path()));
+        assert!(!app.dirty, "新标签不应继承未保存状态");
+
+        app.load_file(a.clone());
+        assert_eq!(app.active_tab, Some(0));
+        assert!(app.dirty, "切回后应恢复未保存标记");
+        assert!(app.editor_text.contains("### 未保存"));
+
+        // 已打开的文件再次点击只切换，不应重复创建标签
+        app.load_file(a.clone());
+        assert_eq!(app.tabs.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 标签栏应显示所有打开文件，并用 ● 标记非当前标签的未保存修改
+    #[test]
+    fn tab_bar_marks_unsaved() {
+        let (dir, a, b) = tab_workspace("bar");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+        app.load_file(b.clone());
+        app.tabs[0].dirty = true;
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            app.draw(ui);
+        });
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "a.http ●"),
+            "未保存标签应带 ● 标记: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "b.http"),
+            "当前标签应显示文件名: {texts:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关闭当前标签后自动激活相邻标签
+    #[test]
+    fn closing_tab_activates_neighbor() {
+        let (dir, a, b) = tab_workspace("close");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+        app.load_file(b.clone());
+        assert_eq!(app.active_tab, Some(1));
+
+        app.close_file();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, Some(0));
+        assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
