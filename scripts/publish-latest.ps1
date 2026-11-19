@@ -1,4 +1,4 @@
-# 拉取 GitHub Actions 最新一次成功构建的 exe，并上传到飞书云盘
+﻿# 拉取 GitHub Actions 最新一次成功构建的 exe，并上传到飞书云盘
 # 用法：powershell -File scripts/publish-latest.ps1 [-Branch explore/native-ui] [-RunId 12345]
 param(
     [string]$Branch = "",
