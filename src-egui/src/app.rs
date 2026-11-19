@@ -175,6 +175,32 @@ impl HttpDeckApp {
         }
     }
 
+    /// 关闭当前文件；有未保存修改时提示先保存，避免误丢内容
+    fn close_file(&mut self) {
+        if self.dirty {
+            self.error = Some("有未保存的修改，请先保存（Ctrl+S）再关闭".to_owned());
+            return;
+        }
+        let name = self
+            .open_file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.open_file = None;
+        self.editor_text.clear();
+        self.parsed = None;
+        self.selected_request = None;
+        self.results.clear();
+        self.scroll_to_char = None;
+        self.error = None;
+        self.status = if name.is_empty() {
+            "文件已关闭".to_owned()
+        } else {
+            format!("已关闭 {name}")
+        };
+    }
+
     fn run_selected(&mut self, ctx: &egui::Context) {
         let (Some(root), Some(file), Some(index)) = (
             self.root.clone(),
@@ -343,6 +369,34 @@ impl HttpDeckApp {
             input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
             input.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
         });
+    }
+
+    /// 点击请求列表时，把编辑器滚动并定位到该请求所在行
+    fn jump_to_request(&mut self, ctx: &egui::Context, index: usize) {
+        let line = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.requests.get(index))
+            .map(|request| request.line)
+            .unwrap_or(1);
+        self.selected_request = Some(index);
+        let char_index = line_start_char(&self.editor_text, line);
+        self.jump_to_char(ctx, char_index);
+    }
+
+    /// 把编辑区光标移到指定字符位置，并滚动到可见区域
+    fn jump_to_char(&mut self, ctx: &egui::Context, char_index: usize) {
+        self.scroll_to_char = Some(char_index);
+        let id = egui::Id::new("http_editor");
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(char_index),
+                )));
+            state.store(ctx, id);
+        }
+        ctx.memory_mut(|memory| memory.request_focus(id));
     }
 
     /// 跳到下一个 / 上一个匹配并选中
@@ -765,6 +819,7 @@ impl HttpDeckApp {
                 ui.take_available_space();
                 ui.strong("请求");
                 ui.separator();
+                let ctx = ui.ctx().clone();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut clicked = None;
                     if let Some(parsed) = &self.parsed {
@@ -788,7 +843,7 @@ impl HttpDeckApp {
                         ui.weak("打开 .http 文件后显示请求列表");
                     }
                     if let Some(index) = clicked {
-                        self.selected_request = Some(index);
+                        self.jump_to_request(&ctx, index);
                     }
                 });
             })
@@ -821,6 +876,7 @@ impl HttpDeckApp {
                     return;
                 };
 
+                let mut close_clicked = false;
                 ui.horizontal(|ui| {
                     let name = path
                         .file_name()
@@ -839,7 +895,16 @@ impl HttpDeckApp {
                             .on_hover_text(parsed.issues.join("\n"));
                         }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✖").on_hover_text("关闭文件").clicked() {
+                            close_clicked = true;
+                        }
+                    });
                 });
+                if close_clicked {
+                    self.close_file();
+                    return;
+                }
                 ui.separator();
 
                 if self.find_open {
@@ -907,6 +972,8 @@ impl HttpDeckApp {
                     .unwrap_or_else(|| egui::FontId::monospace(14.0));
                 let digit_w = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
                 let gutter_w = (line_count.to_string().len() as f32 * digit_w + 14.0).ceil();
+                // 行号栏与正文之间留出间隙，否则行首光标会被后绘制的行号栏覆盖
+                let text_left = gutter_w as i8 + 8;
 
                 let mut paint_info = None;
                 let scroll_output = egui::ScrollArea::both()
@@ -919,7 +986,7 @@ impl HttpDeckApp {
                             .desired_width(f32::INFINITY)
                             .desired_rows(30)
                             .margin(egui::Margin {
-                                left: gutter_w as i8,
+                                left: text_left,
                                 right: 4,
                                 top: 4,
                                 bottom: 4,
@@ -930,14 +997,14 @@ impl HttpDeckApp {
                             self.dirty = true;
                             self.reparse();
                         }
-                        // 查找跳转是在 widget 运行前改的状态，TextEdit 检测不到选区变化，
-                        // 不会自动滚动，这里手动把匹配位置滚动到可视区域
+                        // 查找 / 请求跳转是在 widget 运行前改的状态，TextEdit 检测不到选区变化，
+                        // 不会自动滚动，这里手动把目标行滚动到可视区域中部
                         if let Some(char_index) = self.scroll_to_char.take() {
                             let cursor_rect = out
                                 .galley
                                 .pos_from_cursor(egui::text::CCursor::new(char_index))
                                 .translate(out.galley_pos.to_vec2());
-                            ui.scroll_to_rect(cursor_rect, None);
+                            ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
                         }
                         paint_info = Some((out.galley.clone(), out.galley_pos));
                     });
@@ -1098,6 +1165,21 @@ fn duplicate_target(source: &Path) -> Result<PathBuf, String> {
         }
         number += 1;
     }
+}
+
+/// 1-based 行号 → 该行行首的字符索引（越界时返回文本末尾）
+fn line_start_char(text: &str, line: usize) -> usize {
+    if line <= 1 {
+        return 0;
+    }
+    let mut chars = 0;
+    for (index, row) in text.split_inclusive('\n').enumerate() {
+        if index + 1 == line {
+            return chars;
+        }
+        chars += row.chars().count();
+    }
+    chars
 }
 
 /// 读取 `http-client.env.json` / `http-client.private.env.json` 中的环境名
@@ -1427,5 +1509,75 @@ mod tests {
         assert!(created.exists(), "Escape 取消不应删除文件");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 关闭文件应清空编辑区状态；有未保存修改时拒绝关闭并提示
+    #[test]
+    fn close_file_clears_editor_state() {
+        let mut app = HttpDeckApp::new();
+        app.open_file = Some(PathBuf::from("test.http"));
+        app.editor_text = "GET a\n".to_owned();
+        app.parsed = Some(parser::parse(&app.editor_text));
+        app.selected_request = Some(0);
+        app.dirty = true;
+
+        app.close_file();
+        assert!(app.open_file.is_some(), "未保存时不应关闭文件");
+        assert!(app.error.is_some(), "应提示未保存");
+
+        app.dirty = false;
+        app.close_file();
+        assert!(app.open_file.is_none());
+        assert!(app.editor_text.is_empty());
+        assert!(app.parsed.is_none());
+        assert!(app.selected_request.is_none());
+        assert!(app.error.is_none());
+    }
+
+    /// 点击请求列表应把光标定位到该请求所在行
+    #[test]
+    fn request_click_jumps_to_request_line() {
+        let mut app = HttpDeckApp::new();
+        app.open_file = Some(PathBuf::from("test.http"));
+        app.editor_text = "### one\nGET a\n\n### two\nPOST b\n".to_owned();
+        app.parsed = Some(parser::parse(&app.editor_text));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1280.0, 820.0),
+            )),
+            focused: true,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            app.draw(ui);
+        });
+        output.textures_delta.clear();
+
+        app.jump_to_request(&ctx, 1);
+        let expected = line_start_char(&app.editor_text, 5);
+        assert_eq!(app.selected_request, Some(1));
+        assert_eq!(app.scroll_to_char, Some(expected));
+        let state = egui::text_edit::TextEditState::load(&ctx, egui::Id::new("http_editor"))
+            .expect("应存在编辑器状态");
+        assert_eq!(
+            state
+                .cursor
+                .char_range()
+                .map(|range| range.primary.index.0 as usize),
+            Some(expected)
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("http_editor"))));
+    }
+
+    /// 行号到字符索引的换算
+    #[test]
+    fn line_start_char_handles_lines() {
+        let text = "a\nbc\n\n中文\n";
+        assert_eq!(line_start_char(text, 1), 0);
+        assert_eq!(line_start_char(text, 2), 2);
+        assert_eq!(line_start_char(text, 4), 6);
+        assert_eq!(line_start_char(text, 99), text.chars().count());
     }
 }
