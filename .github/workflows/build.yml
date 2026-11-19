@@ -31,9 +31,13 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # tauri.conf.json 的 bundle.resources 依赖这个可执行文件，必须先构建
+      # tauri-build 编译依赖库时会提前校验 bundle.resources；
+      # 干净环境下先放占位文件，随后由真正的 MCP 构建产物覆盖。
       - name: Build MCP server
-        run: cargo build --release -p httpdeck-mcp
+        run: |
+          New-Item -ItemType Directory -Force target/release | Out-Null
+          New-Item -ItemType File -Force target/release/httpdeck-mcp.exe | Out-Null
+          cargo build --release -p httpdeck-mcp
 
       - name: Build Tauri app (NSIS installer)
         run: npm run tauri build
