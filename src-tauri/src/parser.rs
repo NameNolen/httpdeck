@@ -493,7 +493,11 @@ fn parse_request_body(
         if !indented {
             break;
         }
-        if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with('>') {
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with("<>")
+        {
             break;
         }
         if split_header(trimmed).is_some() {
@@ -516,7 +520,7 @@ fn parse_request_body(
             i += 1;
             break;
         }
-        if trimmed.starts_with('>') {
+        if trimmed.starts_with('>') || trimmed.starts_with("<>") {
             return i;
         }
         if trimmed.starts_with("//") {
@@ -543,7 +547,10 @@ fn parse_request_body(
         while i < lines.len() {
             let raw = lines[i];
             let trimmed = raw.trim();
-            if trimmed.starts_with("###") || trimmed.starts_with('>') {
+            if trimmed.starts_with("###")
+                || trimmed.starts_with('>')
+                || trimmed.starts_with("<>")
+            {
                 break;
             }
             body_lines.push(raw);
@@ -881,6 +888,62 @@ graphqlfoo is not a keyword
         assert_eq!(
             parsed.requests[0].body,
             BodySpec::Inline("graphqlfoo is not a keyword".to_string())
+        );
+    }
+
+    #[test]
+    fn angle_bracket_save_directive_not_in_body() {
+        // 用户实际场景：body 后跟多个 <> filename 保存指令
+        let src = r#"
+### stop 数字人 75 384
+POST {{host}}/stop_spawn
+Content-Type: application/json
+
+{
+    "push_url": "{{push_url}}"
+}
+
+
+<> 2026-11-12T191501.200.json
+<> 2026-11-12T191247.200.json
+<> 2026-11-12T154551.200.json
+"#;
+        let parsed = parse(src);
+        assert_eq!(parsed.requests.len(), 1);
+        let req = &parsed.requests[0];
+        // body 不应包含 <> 行
+        let BodySpec::Inline(body) = &req.body else {
+            panic!("expected inline body");
+        };
+        assert!(!body.contains("<>"), "body 不应包含 <> 指令，实际 body: {body}");
+        assert!(body.contains("push_url"));
+        // 当前 save_response 是 Option，多个 <> 时后者覆盖前者
+        let spec = req.save_response.as_ref().expect("应有 save_response");
+        assert_eq!(spec.path, "2026-11-12T154551.200.json");
+        assert!(!spec.append);
+    }
+
+    #[test]
+    fn multiple_angle_bracket_save_collected() {
+        // 验证多个 <> 保存指令都被识别（当前实现只保留最后一个，至少都不进 body）
+        let src = r#"
+POST http://localhost/x
+
+hello
+
+<> a.json
+<> b.json
+<> c.json
+"#;
+        let parsed = parse(src);
+        let BodySpec::Inline(body) = &parsed.requests[0].body else {
+            panic!("expected inline body");
+        };
+        assert_eq!(body.trim(), "hello");
+        assert!(!body.contains("<>"));
+        assert_eq!(
+            parsed.requests[0].save_response.as_ref().unwrap().path,
+            "c.json"
         );
     }
 }
