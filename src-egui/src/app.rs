@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use httpdeck_lib::models::{FileNode, RequestResult};
+use httpdeck_lib::models::{FileNode, RequestResult, RequestSummary};
 use httpdeck_lib::parser::{self, ParsedHttpFile};
 use httpdeck_lib::{recent, workspace};
 
@@ -46,6 +46,10 @@ pub struct HttpDeckApp {
     parsed: Option<ParsedHttpFile>,
     selected_request: Option<usize>,
     results: HashMap<usize, RequestResult>,
+    /// 左侧目录中已展开请求列表的文件（绝对路径）
+    expanded_files: HashSet<String>,
+    /// 懒解析得到的文件请求列表，展开时才填充
+    file_requests: HashMap<String, Vec<RequestSummary>>,
 
     running: usize,
     status: String,
@@ -83,6 +87,8 @@ impl HttpDeckApp {
             parsed: None,
             selected_request: None,
             results: HashMap::new(),
+            expanded_files: HashSet::new(),
+            file_requests: HashMap::new(),
             running: 0,
             status: String::new(),
             error: None,
@@ -384,6 +390,35 @@ impl HttpDeckApp {
         self.jump_to_char(ctx, char_index);
     }
 
+    /// 展开 / 折叠目录树中某个文件的请求列表（展开时懒解析）
+    fn toggle_requests(&mut self, path: &Path) {
+        let key = path.to_string_lossy().to_string();
+        if self.expanded_files.remove(&key) {
+            self.file_requests.remove(&key);
+            return;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let requests = parser::parse(&text).to_output().requests;
+                self.file_requests.insert(key.clone(), requests);
+                self.expanded_files.insert(key);
+            }
+            Err(err) => self.error = Some(format!("读取失败: {err}")),
+        }
+    }
+
+    /// 从目录树点击请求：打开对应文件并定位到该请求行
+    fn open_request(&mut self, ctx: &egui::Context, path: PathBuf, index: usize) {
+        if self.open_file.as_deref() != Some(path.as_path()) {
+            if self.dirty {
+                self.error = Some("有未保存的修改，请先保存（Ctrl+S）再切换文件".to_owned());
+                return;
+            }
+            self.load_file(path);
+        }
+        self.jump_to_request(ctx, index);
+    }
+
     /// 把编辑区光标移到指定字符位置，并滚动到可见区域
     fn jump_to_char(&mut self, ctx: &egui::Context, char_index: usize) {
         self.scroll_to_char = Some(char_index);
@@ -493,8 +528,16 @@ impl HttpDeckApp {
         }
     }
 
-    fn handle_tree_action(&mut self, action: tree::TreeAction) {
+    fn handle_tree_action(&mut self, ctx: &egui::Context, action: tree::TreeAction) {
         let dialog = match action {
+            tree::TreeAction::ToggleRequests(path) => {
+                self.toggle_requests(&path);
+                return;
+            }
+            tree::TreeAction::OpenRequest(path, index) => {
+                self.open_request(ctx, path, index);
+                return;
+            }
             tree::TreeAction::NewFile(dir) => FileDialog::New {
                 dir,
                 name: "new.http".to_owned(),
@@ -761,6 +804,12 @@ impl HttpDeckApp {
                 let mut action = None;
                 let mut open = None;
                 if let (Some(workspace_root), Some(node)) = (self.root.as_ref(), tree.as_ref()) {
+                    let state = tree::TreeState {
+                        pinned: &self.pinned,
+                        selected: self.open_file.as_deref(),
+                        expanded: &self.expanded_files,
+                        file_requests: &self.file_requests,
+                    };
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if !self.pinned.is_empty() {
                             ui.strong("置顶常用");
@@ -776,25 +825,11 @@ impl HttpDeckApp {
                                     is_dir: false,
                                     children: Vec::new(),
                                 };
-                                tree::render_file(
-                                    ui,
-                                    &node,
-                                    true,
-                                    self.open_file.as_deref(),
-                                    &mut open,
-                                    &mut action,
-                                );
+                                tree::render_file(ui, &node, true, &state, &mut open, &mut action);
                             }
                             ui.separator();
                         }
-                        tree::render(
-                            ui,
-                            node,
-                            &self.pinned,
-                            self.open_file.as_deref(),
-                            &mut open,
-                            &mut action,
-                        );
+                        tree::render(ui, node, &state, &mut open, &mut action);
                     });
                 }
                 self.tree = tree;
@@ -804,7 +839,7 @@ impl HttpDeckApp {
                 // 注意要在恢复 self.tree 之后再处理动作，
                 // 否则动作里的 refresh_tree 会被上面的旧树覆盖
                 if let Some(action) = action {
-                    self.handle_tree_action(action);
+                    self.handle_tree_action(&ui.ctx().clone(), action);
                 }
             })
             .response
@@ -860,7 +895,22 @@ impl HttpDeckApp {
                 let result = self
                     .selected_request
                     .and_then(|index| self.results.get(&index));
-                response::ui(ui, result, self.error.as_deref());
+                let mut all: Vec<(usize, &RequestResult)> = self
+                    .results
+                    .iter()
+                    .map(|(index, item)| (*index, item))
+                    .collect();
+                all.sort_by_key(|(index, _)| *index);
+                let clicked = response::ui(
+                    ui,
+                    result,
+                    self.error.as_deref(),
+                    &all,
+                    self.selected_request,
+                );
+                if let Some(index) = clicked {
+                    self.selected_request = Some(index);
+                }
             })
             .response
             .rect
@@ -971,8 +1021,9 @@ impl HttpDeckApp {
                     .cloned()
                     .unwrap_or_else(|| egui::FontId::monospace(14.0));
                 let digit_w = ui.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
-                let gutter_w = (line_count.to_string().len() as f32 * digit_w + 14.0).ceil();
-                // 行号栏与正文之间留出间隙，否则行首光标会被后绘制的行号栏覆盖
+                let gutter_w = (line_count.to_string().len() as f32 * digit_w + 30.0).ceil();
+                // 行号栏与正文之间留出间隙，否则行首光标会被后绘制的行号栏覆盖；
+                // 额外宽度用于绘制请求行的运行按钮
                 let text_left = gutter_w as i8 + 8;
 
                 let mut paint_info = None;
@@ -1009,6 +1060,7 @@ impl HttpDeckApp {
                         paint_info = Some((out.galley.clone(), out.galley_pos));
                     });
 
+                let mut run_request = None;
                 if let Some((galley, galley_pos)) = paint_info {
                     let viewport = scroll_output.inner_rect;
                     let painter = ui.painter().with_clip_rect(viewport);
@@ -1032,6 +1084,50 @@ impl HttpDeckApp {
                             ui.visuals().weak_text_color(),
                         );
                     }
+                    // 请求所在行：行号左侧绘制运行按钮，点击直接执行该请求
+                    if let Some(parsed) = &self.parsed {
+                        for (index, request) in parsed.requests.iter().enumerate() {
+                            let Some(row) = galley.rows.get(request.line.saturating_sub(1)) else {
+                                continue;
+                            };
+                            let height = row.rect().height().max(font_id.size + 4.0);
+                            let y = galley_pos.y + row.rect().min.y;
+                            if y + height < viewport.top() || y > viewport.bottom() {
+                                continue;
+                            }
+                            let rect = egui::Rect::from_min_size(
+                                egui::pos2(viewport.left() + 1.0, y),
+                                egui::vec2(15.0, height),
+                            );
+                            let color = if self.selected_request == Some(index) {
+                                ui.visuals().strong_text_color()
+                            } else {
+                                ui.visuals().weak_text_color()
+                            };
+                            painter.text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "▶",
+                                font_id.clone(),
+                                color,
+                            );
+                            let response = ui
+                                .interact(
+                                    rect,
+                                    egui::Id::new(("run_request", index)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(format!("运行 {}", request.display_name()));
+                            if response.clicked() {
+                                run_request = Some(index);
+                            }
+                        }
+                    }
+                }
+                if let Some(index) = run_request {
+                    let ctx = ui.ctx().clone();
+                    self.selected_request = Some(index);
+                    self.run_selected(&ctx);
                 }
             })
             .response
@@ -1348,6 +1444,73 @@ mod tests {
         }
     }
 
+    /// 打开文件后布局仍需保持三栏 + 响应面板，且编辑器左栏渲染请求运行按钮
+    #[test]
+    fn layout_stable_with_file_open() {
+        let dir = std::env::temp_dir().join(format!("httpdeck-egui-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("api")).unwrap();
+        let file = dir.join("api").join("demo.http");
+        std::fs::write(
+            &file,
+            "@host = http://127.0.0.1:1\n\n### 本地 JSON\nGET {{host}}/json\n\n### 底部请求\nPOST {{host}}/post\nContent-Type: application/json\n\n{\"name\":\"x\"}\n",
+        )
+        .unwrap();
+
+        let mut app = HttpDeckApp::new();
+        let ctx = egui::Context::default();
+        ctx.set_pixels_per_point(1.5);
+        app.load_workspace(dir.clone());
+        app.load_file(file.clone());
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut texts = Vec::new();
+        // 多画若干帧，防止面板宽度逐帧累积膨胀（曾因行内按钮预留宽度不足导致）
+        for _ in 0..30 {
+            let mut rects = None;
+            let mut output = ctx.run_ui(input.clone(), |ui| {
+                rects = Some(app.draw(ui));
+            });
+            output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            let rects = rects.expect("draw 未执行");
+            assert!(
+                rects.tree.width() < 600.0,
+                "目录面板不应撑满窗口: {:?}",
+                rects.tree
+            );
+            assert!(
+                rects.requests.width() > 100.0,
+                "请求面板应保持可见: {:?}",
+                rects.requests
+            );
+            assert!(
+                rects.response.height() > 100.0,
+                "响应面板应保持可见: {:?}",
+                rects.response
+            );
+        }
+        assert_eq!(
+            texts.iter().filter(|text| text.as_str() == "▶").count(),
+            2,
+            "每个请求行应渲染一个运行按钮，实际: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 查找打开时 Enter 应循环选中匹配，且不能被编辑器当成输入修改文本
     #[test]
     fn find_enter_selects_match_without_editing() {
@@ -1435,6 +1598,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 目录树点击请求：打开文件并把光标定位到该请求所在行
+    #[test]
+    fn open_request_jumps_to_request_line() {
+        let dir = std::env::temp_dir().join(format!("httpdeck-egui-jump-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.http");
+        let text = "@host = http://127.0.0.1:1\n\n### 本地 JSON\nGET {{host}}/json\n\n### 底部请求\nPOST {{host}}/post\n";
+        std::fs::write(&file, text).unwrap();
+
+        let mut app = HttpDeckApp::new();
+        let ctx = egui::Context::default();
+        app.load_workspace(dir.clone());
+        app.open_request(&ctx, file.clone(), 1);
+
+        assert_eq!(app.open_file.as_deref(), Some(file.as_path()));
+        assert_eq!(app.selected_request, Some(1));
+        assert_eq!(app.scroll_to_char, Some(line_start_char(text, 7)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 展开目录树中的文件时应懒解析出请求列表，再次点击折叠并清理缓存
+    #[test]
+    fn toggle_requests_parses_file() {
+        let dir = std::env::temp_dir().join(format!("httpdeck-egui-expand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("demo.http");
+        std::fs::write(
+            &file,
+            "### 登录\nPOST https://example.com/login\nContent-Type: application/json\n\n{\"user\":\"a\"}\n",
+        )
+        .unwrap();
+        let mut app = HttpDeckApp::new();
+        app.toggle_requests(&file);
+        let key = file.to_string_lossy().to_string();
+        assert!(app.expanded_files.contains(&key));
+        assert_eq!(app.file_requests.get(&key).map(Vec::len), Some(1));
+        app.toggle_requests(&file);
+        assert!(!app.expanded_files.contains(&key));
+        assert!(app.file_requests.get(&key).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 置顶与取消置顶应同步界面状态并持久化到工作区配置
     #[test]
     fn pin_file_persists() {
@@ -1445,12 +1652,13 @@ mod tests {
         std::fs::write(&file, "GET https://example.com\n").unwrap();
         let mut app = HttpDeckApp::new();
         app.root = Some(dir.clone());
+        let ctx = egui::Context::default();
 
-        app.handle_tree_action(tree::TreeAction::SetPinned(file.clone(), true));
+        app.handle_tree_action(&ctx, tree::TreeAction::SetPinned(file.clone(), true));
         assert_eq!(app.pinned, vec!["demo.http"]);
         assert_eq!(workspace::load_config(&dir).pinned, vec!["demo.http"]);
 
-        app.handle_tree_action(tree::TreeAction::SetPinned(file, false));
+        app.handle_tree_action(&ctx, tree::TreeAction::SetPinned(file, false));
         assert!(app.pinned.is_empty());
         assert!(workspace::load_config(&dir).pinned.is_empty());
 

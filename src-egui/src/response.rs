@@ -18,7 +18,15 @@ enum BodyView {
     Raw,
 }
 
-pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>) {
+/// 渲染响应面板；返回用户点击切换的结果索引
+pub fn ui(
+    ui: &mut egui::Ui,
+    result: Option<&RequestResult>,
+    error: Option<&str>,
+    results: &[(usize, &RequestResult)],
+    selected: Option<usize>,
+) -> Option<usize> {
+    let mut clicked_result = None;
     ui.horizontal(|ui| {
         ui.strong("响应");
         if let Some(result) = result {
@@ -43,9 +51,26 @@ pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>
 
     ui.separator();
 
+    // 多结果切换条：整个文件运行后可在不同请求的结果之间切换
+    if results.len() > 1 {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("全部结果");
+            for (index, item) in results {
+                let label = format!("#{} {} {}", index + 1, item.method, item.status);
+                let response = ui
+                    .selectable_label(selected == Some(*index), label)
+                    .on_hover_text(format!("{} {}", item.method, item.name));
+                if response.clicked() {
+                    clicked_result = Some(*index);
+                }
+            }
+        });
+        ui.separator();
+    }
+
     let Some(result) = result else {
         ui.weak("尚未执行请求");
-        return;
+        return clicked_result;
     };
 
     let tab_id = egui::Id::new("response_tab");
@@ -56,6 +81,13 @@ pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>
     let mut body_view = ui
         .memory(|memory| memory.data.get_temp::<BodyView>(view_id))
         .unwrap_or(BodyView::Pretty);
+
+    let search_id = egui::Id::new("response_search");
+    let mut search = ui
+        .memory(|memory| memory.data.get_temp::<String>(search_id))
+        .unwrap_or_default();
+    let mut copy_current = false;
+    let mut copy_curl = false;
 
     ui.horizontal(|ui| {
         select_tab(ui, &mut tab, ResponseTab::Body, "响应体".to_owned());
@@ -85,6 +117,27 @@ pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>
                     body_view = view;
                 }
             }
+            ui.add(
+                egui::TextEdit::singleline(&mut search)
+                    .id(search_id)
+                    .hint_text("搜索")
+                    .desired_width(120.0),
+            );
+        }
+        ui.separator();
+        if ui
+            .button("复制")
+            .on_hover_text("复制当前标签内容")
+            .clicked()
+        {
+            copy_current = true;
+        }
+        if ui
+            .button("cURL")
+            .on_hover_text("复制为 curl 命令")
+            .clicked()
+        {
+            copy_curl = true;
         }
     });
     ui.separator();
@@ -108,7 +161,11 @@ pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>
                         ui.weak("二进制响应，以下内容为 Base64 编码");
                     }
                     let text = body_text(result, body_view == BodyView::Pretty);
-                    selectable_code(ui, text);
+                    let (shown, matched) = filter_lines(&text, &search);
+                    if !search.is_empty() {
+                        ui.weak(format!("匹配 {matched} 行"));
+                    }
+                    selectable_code(ui, shown);
                 }
                 ResponseTab::Headers => {
                     if result.response_headers.is_empty() {
@@ -151,10 +208,42 @@ pub fn ui(ui: &mut egui::Ui, result: Option<&RequestResult>, error: Option<&str>
             }
         });
 
+    if copy_current {
+        let text = match tab {
+            ResponseTab::Body => body_text(result, body_view == BodyView::Pretty),
+            ResponseTab::Headers => result
+                .response_headers
+                .iter()
+                .map(|header| format!("{}: {}", header.name, header.value))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ResponseTab::Tests => result
+                .tests
+                .iter()
+                .map(|test| {
+                    format!(
+                        "{} {}",
+                        if test.passed { "PASS" } else { "FAIL" },
+                        test.name
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            ResponseTab::Console => result.logs.join("\n"),
+            ResponseTab::Request => actual_request_text(result),
+        };
+        ui.ctx().copy_text(text);
+    }
+    if copy_curl {
+        ui.ctx().copy_text(curl_text(result));
+    }
+
     ui.memory_mut(|memory| {
         memory.data.insert_temp(tab_id, tab);
         memory.data.insert_temp(view_id, body_view);
+        memory.data.insert_temp(search_id, search);
     });
+    clicked_result
 }
 
 fn select_tab(ui: &mut egui::Ui, current: &mut ResponseTab, tab: ResponseTab, label: String) {
@@ -200,6 +289,42 @@ fn pretty_body(result: &RequestResult) -> String {
     serde_json::from_str::<serde_json::Value>(&result.body)
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or_else(|_| result.body.clone())
+}
+
+/// 按关键词过滤文本，返回（过滤后文本，匹配行数）
+fn filter_lines(text: &str, query: &str) -> (String, usize) {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return (text.to_owned(), 0);
+    }
+    let mut kept = Vec::new();
+    for line in text.lines() {
+        if line.to_lowercase().contains(&query) {
+            kept.push(line);
+        }
+    }
+    (kept.join("\n"), kept.len())
+}
+
+/// 把实际请求转换为可直接执行的 curl 命令
+fn curl_text(result: &RequestResult) -> String {
+    let escape = |value: &str| value.replace('\'', "'\\''");
+    let mut parts = vec![format!(
+        "curl -X {} '{}'",
+        result.method,
+        escape(&result.url)
+    )];
+    for header in &result.request_headers {
+        parts.push(format!(
+            "-H '{}: {}'",
+            escape(&header.name),
+            escape(&header.value)
+        ));
+    }
+    if let Some(body) = &result.request_body {
+        parts.push(format!("--data-raw '{}'", escape(body)));
+    }
+    parts.join(" \\\n  ")
 }
 
 fn actual_request_text(result: &RequestResult) -> String {
@@ -317,6 +442,65 @@ mod tests {
     }
 
     #[test]
+    fn filter_keeps_only_matching_lines() {
+        let text = "{\n  \"name\": \"HttpDeck\",\n  \"items\": [1,2]\n}";
+        assert_eq!(filter_lines(text, "").1, 0);
+        let (shown, matched) = filter_lines(text, "name");
+        assert_eq!(matched, 1);
+        assert_eq!(shown, "  \"name\": \"HttpDeck\",");
+        assert_eq!(filter_lines(text, "NOTHING").1, 0);
+    }
+
+    #[test]
+    fn curl_text_contains_method_headers_and_body() {
+        let text = curl_text(&sample_result());
+        assert!(text.starts_with("curl -X POST 'http://127.0.0.1:8080/api?final=true'"));
+        assert!(text.contains("-H 'Content-Type: application/json'"));
+        assert!(text.contains("--data-raw '{\"input\":42}'"));
+    }
+
+    #[test]
+    fn multi_results_render_switch_chips() {
+        let ctx = egui::Context::default();
+        let first = sample_result();
+        let mut second = sample_result();
+        second.request_index = 1;
+        second.method = "GET".to_owned();
+        second.status = 404;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(
+                    ui,
+                    Some(&first),
+                    None,
+                    &[(0, &first), (1, &second)],
+                    Some(0),
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("#2 GET 404")),
+            "应渲染第二个结果的可切换标签，实际: {texts:?}"
+        );
+    }
+
+    #[test]
     fn raw_body_button_is_clickable() {
         let ctx = egui::Context::default();
         let result = sample_result();
@@ -329,7 +513,9 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            let mut output = ctx.run_ui(input, |ui| super::ui(ui, Some(&result), None));
+            let mut output = ctx.run_ui(input, |ui| {
+                super::ui(ui, Some(&result), None, &[], None);
+            });
             output.textures_delta.clear();
             output
         };
