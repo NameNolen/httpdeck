@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use httpdeck_lib::models::{FileNode, HistoryEntry, RequestResult, RequestSummary};
+use httpdeck_lib::models::{FileNode, HistoryEntry, KeyValue, RequestResult, RequestSummary};
 use httpdeck_lib::parser::{self, ParsedHttpFile};
 use httpdeck_lib::{history, recent, workspace};
 
@@ -33,6 +33,7 @@ enum FileDialog {
 enum RequestsTab {
     Requests,
     History,
+    Globals,
 }
 
 /// 一个已打开文件的标签；切换标签时用它保存 / 恢复编辑器状态
@@ -63,6 +64,8 @@ pub struct HttpDeckApp {
     /// 当前工作区的请求历史（新的在前）
     history: Vec<HistoryEntry>,
     history_search: String,
+    /// 脚本写入的 client.global 变量快照
+    globals: Vec<KeyValue>,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -109,6 +112,7 @@ impl HttpDeckApp {
             requests_tab: RequestsTab::Requests,
             history: Vec::new(),
             history_search: String::new(),
+            globals: Vec::new(),
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -169,6 +173,7 @@ impl HttpDeckApp {
         self.error = None;
         self.status = "工作区已加载".to_owned();
         self.refresh_history();
+        self.refresh_globals();
     }
 
     fn load_file(&mut self, path: PathBuf) {
@@ -433,6 +438,7 @@ impl HttpDeckApp {
         }
         if received {
             self.refresh_history();
+            self.refresh_globals();
         }
         if self.running > 0 {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -628,6 +634,32 @@ impl HttpDeckApp {
         }
         self.refresh_history();
         self.status = "已清空请求历史".to_owned();
+    }
+
+    /// 从工作区读取 client.global 变量快照
+    fn refresh_globals(&mut self) {
+        self.globals = match &self.root {
+            Some(root) => {
+                let workspace = root.to_string_lossy().to_string();
+                httpdeck_lib::get_globals_for(&self.state, &workspace).unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+    }
+
+    fn clear_globals(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let workspace = root.to_string_lossy().to_string();
+        match httpdeck_lib::clear_globals_for(&self.state, &workspace) {
+            Ok(()) => {
+                self.refresh_globals();
+                self.error = None;
+                self.status = "已清空 client.global 变量".to_owned();
+            }
+            Err(err) => self.error = Some(err),
+        }
     }
 
     /// 打开历史对应的文件并选中该请求；失败时返回 false
@@ -1104,12 +1136,21 @@ impl HttpDeckApp {
                         self.requests_tab = RequestsTab::History;
                         self.refresh_history();
                     }
+                    if ui
+                        .selectable_label(self.requests_tab == RequestsTab::Globals, "变量")
+                        .on_hover_text("脚本写入的 client.global 变量")
+                        .clicked()
+                    {
+                        self.requests_tab = RequestsTab::Globals;
+                        self.refresh_globals();
+                    }
                 });
                 ui.separator();
                 let ctx = ui.ctx().clone();
                 match self.requests_tab {
                     RequestsTab::Requests => self.requests_list(ui, &ctx),
                     RequestsTab::History => self.history_list(ui, &ctx),
+                    RequestsTab::Globals => self.globals_list(ui),
                 }
             })
             .response
@@ -1197,6 +1238,49 @@ impl HttpDeckApp {
                             .on_hover_text(format!("{}\n{}", entry.url, entry.time));
                     });
                 }
+            });
+    }
+
+    /// client.global 变量列表，支持刷新与一键清空
+    fn globals_list(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.small_button("刷新").clicked() {
+                self.refresh_globals();
+            }
+            if ui
+                .small_button("清空")
+                .on_hover_text("清空所有 client.global 变量")
+                .clicked()
+            {
+                self.clear_globals();
+            }
+            ui.weak(format!("{} 项", self.globals.len()));
+        });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("globals")
+            .show(ui, |ui| {
+                if self.globals.is_empty() {
+                    ui.weak("暂无 client.global 变量");
+                }
+                egui::Grid::new("globals_grid")
+                    .striped(true)
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.strong("名称");
+                        ui.strong("值");
+                        ui.end_row();
+                        for item in &self.globals {
+                            ui.label(&item.name);
+                            ui.add(
+                                egui::Label::new(item.value.clone())
+                                    .truncate()
+                                    .sense(egui::Sense::hover()),
+                            )
+                            .on_hover_text(&item.value);
+                            ui.end_row();
+                        }
+                    });
             });
     }
 
@@ -2309,6 +2393,52 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "订单");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// client.global 变量应能展示并一键清空，且同步写入磁盘
+    #[test]
+    fn globals_list_and_clear() {
+        let (dir, _a, _b) = tab_workspace("globals");
+        let store = dir.join(".http-client").join("globals.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, r#"{"token":"abc"}"#).unwrap();
+
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        assert_eq!(app.globals.len(), 1, "载入工作区应读取 globals");
+        assert_eq!(app.globals[0].name, "token");
+        assert_eq!(app.globals[0].value, "abc");
+
+        app.requests_tab = RequestsTab::Globals;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            app.draw(ui);
+        });
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|text| text == "token"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "abc"), "{texts:?}");
+
+        app.clear_globals();
+        assert!(app.globals.is_empty());
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert_eq!(text.trim(), "{}", "清空应写入磁盘");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

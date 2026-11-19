@@ -44,7 +44,7 @@ cargo build --release -p httpdeck-egui
 - [x] 多结果切换、响应体搜索、复制内容 / cURL
 - [x] 多标签：多文件同时打开、切换、未保存标记
 - [x] 请求历史面板：历史列表、搜索、重发
-- [ ] `client.global` 变量查看与清空
+- [x] `client.global` 变量查看与清空
 - [ ] 目录级批量运行：右键目录递归执行
 - [ ] MCP 状态面板：启动 / 停止内置 MCP Server、查看状态
 - [ ] 网络设置界面：代理（HTTP / SOCKS5）、mTLS 客户端证书

@@ -722,8 +722,13 @@ pub fn get_globals_for(state: &AppState, workspace: &str) -> Result<Vec<KeyValue
 
 #[tauri::command]
 fn clear_globals(state: State<'_, AppState>, workspace: String) -> Result<(), String> {
-    let root = canonical_root(&workspace)?;
-    store_globals(&state, &root, HashMap::new());
+    clear_globals_for(&state, &workspace)
+}
+
+/// 供 MCP / egui 等非 tauri 上下文调用：清空脚本写入的 client.global 变量
+pub fn clear_globals_for(state: &AppState, workspace: &str) -> Result<(), String> {
+    let root = canonical_root(workspace)?;
+    store_globals(state, &root, HashMap::new());
     Ok(())
 }
 
