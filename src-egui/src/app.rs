@@ -4,7 +4,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use httpdeck_lib::models::{
-    FileNode, FileRunResult, HistoryEntry, KeyValue, RequestResult, RequestSummary,
+    FileNode, FileRunResult, HistoryEntry, KeyValue, McpStatus, RequestResult, RequestSummary,
 };
 use httpdeck_lib::parser::{self, ParsedHttpFile};
 use httpdeck_lib::{history, recent, workspace};
@@ -23,6 +23,7 @@ enum TaskMsg {
     FolderDone {
         result: Result<Vec<FileRunResult>, String>,
     },
+    McpDone(Result<McpStatus, String>),
 }
 
 /// 文件操作对话框（右键菜单触发）
@@ -71,6 +72,9 @@ pub struct HttpDeckApp {
     history_search: String,
     /// 脚本写入的 client.global 变量快照
     globals: Vec<KeyValue>,
+    show_mcp: bool,
+    mcp_busy: bool,
+    mcp_status: Option<McpStatus>,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -118,6 +122,9 @@ impl HttpDeckApp {
             history: Vec::new(),
             history_search: String::new(),
             globals: Vec::new(),
+            show_mcp: false,
+            mcp_busy: false,
+            mcp_status: None,
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -461,6 +468,22 @@ impl HttpDeckApp {
                         self.error = Some(err);
                     }
                 },
+                TaskMsg::McpDone(result) => {
+                    self.mcp_busy = false;
+                    match result {
+                        Ok(status) => {
+                            let running = status.running;
+                            self.mcp_status = Some(status);
+                            self.error = None;
+                            self.status = if running {
+                                "MCP Server 已启动".to_owned()
+                            } else {
+                                "MCP Server 已停止".to_owned()
+                            };
+                        }
+                        Err(err) => self.error = Some(err),
+                    }
+                }
                 TaskMsg::FolderDone { result } => match result {
                     Ok(files) => {
                         let file_count = files.len();
@@ -1090,6 +1113,19 @@ impl HttpDeckApp {
                         ui.spinner();
                     }
                     ui.separator();
+                    let mcp_running = self.mcp_status.as_ref().is_some_and(|s| s.running);
+                    let label = if mcp_running { "MCP ●" } else { "MCP" };
+                    if ui
+                        .button(label)
+                        .on_hover_text("MCP Server 状态与管理")
+                        .clicked()
+                    {
+                        self.show_mcp = !self.show_mcp;
+                        if self.show_mcp {
+                            self.refresh_mcp_status();
+                        }
+                    }
+                    ui.separator();
 
                     if let Some(error) = &self.error {
                         ui.colored_label(egui::Color32::from_rgb(230, 100, 100), error.as_str());
@@ -1636,8 +1672,155 @@ impl HttpDeckApp {
             central: self.editor_panel(ui),
         };
         self.render_file_dialog(&ctx);
+        self.mcp_window(&ctx);
         rects
     }
+
+    fn refresh_mcp_status(&mut self) {
+        self.mcp_status = Some(httpdeck_lib::mcp_status());
+    }
+
+    /// 启动 MCP Server；阻塞操作放到后台线程，避免卡住界面
+    fn start_mcp(&mut self, ctx: &egui::Context) {
+        if self.mcp_busy {
+            return;
+        }
+        self.mcp_busy = true;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = start_mcp_process();
+            let _ = tx.send(TaskMsg::McpDone(result));
+            ctx.request_repaint();
+        });
+    }
+
+    fn stop_mcp(&mut self, ctx: &egui::Context) {
+        if self.mcp_busy {
+            return;
+        }
+        self.mcp_busy = true;
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = stop_mcp_process();
+            let _ = tx.send(TaskMsg::McpDone(result));
+            ctx.request_repaint();
+        });
+    }
+
+    /// MCP 状态窗口：运行状态、PID/端口/地址、启动与停止
+    fn mcp_window(&mut self, ctx: &egui::Context) {
+        if !self.show_mcp {
+            return;
+        }
+        let mut open = self.show_mcp;
+        egui::Window::new("MCP Server")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                match &self.mcp_status {
+                    None => {
+                        ui.weak("未获取状态");
+                    }
+                    Some(status) if status.running => {
+                        ui.colored_label(egui::Color32::from_rgb(90, 190, 120), "运行中");
+                        if let Some(pid) = status.pid {
+                            ui.label(format!("PID {pid}"));
+                        }
+                        if let Some(port) = status.port {
+                            ui.label(format!("端口 {port}"));
+                        }
+                        if let Some(endpoint) = &status.endpoint {
+                            ui.label(format!("地址 {endpoint}"));
+                        }
+                        if let Some(started) = &status.started_at {
+                            ui.weak(format!("启动于 {started}"));
+                        }
+                    }
+                    Some(_) => {
+                        ui.weak("未运行");
+                    }
+                }
+                ui.separator();
+                if let Some(status) = &self.mcp_status {
+                    ui.weak(match &status.exe_path {
+                        Some(path) => format!("可执行文件 {path}"),
+                        None => "未找到 httpdeck-mcp 可执行文件".to_owned(),
+                    });
+                    ui.weak(format!("状态文件 {}", status.lock_path));
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let running = self.mcp_status.as_ref().is_some_and(|s| s.running);
+                    let ctx = ui.ctx().clone();
+                    if ui
+                        .add_enabled(!running && !self.mcp_busy, egui::Button::new("启动"))
+                        .clicked()
+                    {
+                        self.start_mcp(&ctx);
+                    }
+                    if ui
+                        .add_enabled(running && !self.mcp_busy, egui::Button::new("停止"))
+                        .clicked()
+                    {
+                        self.stop_mcp(&ctx);
+                    }
+                    if ui
+                        .add_enabled(!self.mcp_busy, egui::Button::new("刷新"))
+                        .clicked()
+                    {
+                        self.refresh_mcp_status();
+                    }
+                    if self.mcp_busy {
+                        ui.spinner();
+                    }
+                });
+            });
+        self.show_mcp = open;
+    }
+}
+
+/// 启动内置 MCP Server（在后台线程调用）
+fn start_mcp_process() -> Result<McpStatus, String> {
+    if httpdeck_lib::mcp_lock::read_info().is_some() {
+        return Ok(httpdeck_lib::mcp_status());
+    }
+    let exe = httpdeck_lib::mcp_lock::mcp_exe_path()
+        .ok_or_else(|| "未找到 httpdeck-mcp 可执行文件，请先构建".to_string())?;
+    let port = 18787u16;
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--port")
+        .arg(port.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 httpdeck-mcp 失败: {e}"))?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match httpdeck_lib::mcp_lock::read_info() {
+        Some(_) => Ok(httpdeck_lib::mcp_status()),
+        None => {
+            let _ = child.wait();
+            Err("httpdeck-mcp 启动后未写入状态文件（可能端口被占用或启动失败）".to_owned())
+        }
+    }
+}
+
+/// 停止内置 MCP Server（在后台线程调用）
+fn stop_mcp_process() -> Result<McpStatus, String> {
+    let info =
+        httpdeck_lib::mcp_lock::read_info().ok_or_else(|| "MCP server 未运行".to_string())?;
+    httpdeck_lib::mcp_lock::kill_by_pid(info.pid)?;
+    Ok(httpdeck_lib::mcp_status())
 }
 
 /// 各面板实际渲染出的矩形（供布局测试断言）
@@ -2398,6 +2581,49 @@ mod tests {
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// MCP 状态窗口应展示运行状态与操作按钮
+    #[test]
+    fn mcp_window_renders_status() {
+        let mut app = HttpDeckApp::new();
+        app.show_mcp = true;
+        app.mcp_status = Some(McpStatus {
+            running: false,
+            pid: None,
+            port: None,
+            endpoint: None,
+            started_at: None,
+            lock_path: "C:/tmp/mcp-server.json".to_owned(),
+            exe_path: None,
+        });
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        // 窗口是独立的 Area，需要第二帧才会真正布局并产出文本图形
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                app.draw(ui);
+            });
+            output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert!(texts.iter().any(|text| text == "MCP Server"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "未运行"), "{texts:?}");
+        assert!(texts.iter().any(|text| text == "启动"), "{texts:?}");
     }
 
     /// 目录批量运行状态栏文案应包含文件数、请求数与失败数

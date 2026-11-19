@@ -589,7 +589,8 @@ fn set_client_cert(
 
 const MCP_DEFAULT_PORT: u16 = 18787;
 
-fn mcp_status() -> McpStatus {
+/// 供 egui / MCP 等非 tauri 上下文读取 MCP Server 状态
+pub fn mcp_status() -> McpStatus {
     let info = mcp_lock::read_info();
     McpStatus {
         running: info.is_some(),

@@ -46,7 +46,7 @@ cargo build --release -p httpdeck-egui
 - [x] 请求历史面板：历史列表、搜索、重发
 - [x] `client.global` 变量查看与清空
 - [x] 目录级批量运行：右键目录递归执行
-- [ ] MCP 状态面板：启动 / 停止内置 MCP Server、查看状态
+- [x] MCP 状态面板：启动 / 停止内置 MCP Server、查看状态
 - [ ] 网络设置界面：代理（HTTP / SOCKS5）、mTLS 客户端证书
 - [ ] JSON 树形视图：响应体按节点折叠 / 展开
 - [ ] 超大响应虚拟滚动（超过 1 MB 关闭美化并按行虚拟化）
