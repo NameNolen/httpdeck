@@ -16,6 +16,7 @@ enum ResponseTab {
 enum BodyView {
     Pretty,
     Raw,
+    Tree,
 }
 
 /// 渲染响应面板；返回用户点击切换的结果索引
@@ -82,6 +83,11 @@ pub fn ui(
         .memory(|memory| memory.data.get_temp::<BodyView>(view_id))
         .unwrap_or(BodyView::Pretty);
 
+    // 只在响应体不大且为合法 JSON 时提供树形视图，避免超大响应解析卡顿
+    let body_json = (!result.body_is_binary && result.body.len() <= BODY_PREVIEW_LIMIT)
+        .then(|| serde_json::from_str::<serde_json::Value>(&result.body).ok())
+        .flatten();
+
     let search_id = egui::Id::new("response_search");
     let mut search = ui
         .memory(|memory| memory.data.get_temp::<String>(search_id))
@@ -117,12 +123,21 @@ pub fn ui(
                     body_view = view;
                 }
             }
-            ui.add(
-                egui::TextEdit::singleline(&mut search)
-                    .id(search_id)
-                    .hint_text("搜索")
-                    .desired_width(120.0),
-            );
+            if body_json.is_some()
+                && ui
+                    .selectable_label(body_view == BodyView::Tree, "树形")
+                    .clicked()
+            {
+                body_view = BodyView::Tree;
+            }
+            if body_view != BodyView::Tree {
+                ui.add(
+                    egui::TextEdit::singleline(&mut search)
+                        .id(search_id)
+                        .hint_text("搜索")
+                        .desired_width(120.0),
+                );
+            }
         }
         ui.separator();
         if ui
@@ -160,12 +175,21 @@ pub fn ui(
                     if result.body_is_binary {
                         ui.weak("二进制响应，以下内容为 Base64 编码");
                     }
-                    let text = body_text(result, body_view == BodyView::Pretty);
-                    let (shown, matched) = filter_lines(&text, &search);
-                    if !search.is_empty() {
-                        ui.weak(format!("匹配 {matched} 行"));
+                    if body_view == BodyView::Tree {
+                        match &body_json {
+                            Some(value) => json_tree(ui, value, "root", 0),
+                            None => {
+                                ui.weak("响应体不是有效 JSON，或超过 200 KB 未提供树形视图");
+                            }
+                        }
+                    } else {
+                        let text = body_text(result, body_view == BodyView::Pretty);
+                        let (shown, matched) = filter_lines(&text, &search);
+                        if !search.is_empty() {
+                            ui.weak(format!("匹配 {matched} 行"));
+                        }
+                        selectable_code(ui, shown);
                     }
-                    selectable_code(ui, shown);
                 }
                 ResponseTab::Headers => {
                     if result.response_headers.is_empty() {
@@ -289,6 +313,87 @@ fn pretty_body(result: &RequestResult) -> String {
     serde_json::from_str::<serde_json::Value>(&result.body)
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or_else(|_| result.body.clone())
+}
+
+const JSON_MAX_DEPTH: usize = 32;
+
+/// 递归渲染 JSON 树；对象 / 数组节点可折叠
+fn json_tree(ui: &mut egui::Ui, value: &serde_json::Value, path: &str, depth: usize) {
+    if depth > JSON_MAX_DEPTH {
+        ui.weak("…（嵌套过深）");
+        return;
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let id = format!("{path}/{key}");
+                let label = format!("{key}  {}", json_summary(child));
+                if json_is_container(child) {
+                    egui::CollapsingHeader::new(label)
+                        .id_salt(&id)
+                        .default_open(depth < 2)
+                        .show(ui, |ui| json_tree(ui, child, &id, depth + 1));
+                } else {
+                    ui.label(label);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let id = format!("{path}[{index}]");
+                let label = format!("[{index}]  {}", json_summary(child));
+                if json_is_container(child) {
+                    egui::CollapsingHeader::new(label)
+                        .id_salt(&id)
+                        .default_open(depth < 2)
+                        .show(ui, |ui| json_tree(ui, child, &id, depth + 1));
+                } else {
+                    ui.label(label);
+                }
+            }
+        }
+        other => {
+            ui.label(json_summary(other));
+        }
+    }
+}
+
+fn json_is_container(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        _ => false,
+    }
+}
+
+/// 节点摘要：容器显示条目数，字符串截断显示
+fn json_summary(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                "{}".to_owned()
+            } else {
+                format!("{{…}} {} 项", map.len())
+            }
+        }
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                "[]".to_owned()
+            } else {
+                format!("[…] {} 项", items.len())
+            }
+        }
+        serde_json::Value::String(text) => {
+            if text.chars().count() > 80 {
+                let mut short: String = text.chars().take(80).collect();
+                short.push('…');
+                format!("\"{short}\"")
+            } else {
+                format!("\"{text}\"")
+            }
+        }
+        other => other.to_string(),
+    }
 }
 
 /// 按关键词过滤文本，返回（过滤后文本，匹配行数）
@@ -498,6 +603,84 @@ mod tests {
             texts.iter().any(|text| text.contains("#2 GET 404")),
             "应渲染第二个结果的可切换标签，实际: {texts:?}"
         );
+    }
+
+    /// JSON 响应可切换树形视图，节点按折叠头渲染
+    #[test]
+    fn json_tree_renders_nodes() {
+        let ctx = egui::Context::default();
+        ctx.memory_mut(|memory| {
+            memory
+                .data
+                .insert_temp(egui::Id::new("response_body_view"), BodyView::Tree);
+        });
+        let result = sample_result();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(ui, Some(&result), None, &[], None);
+            },
+        );
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "name  \"HttpDeck\""),
+            "应渲染字符串节点: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text == "items  […] 2 项"),
+            "数组节点应显示条目数: {texts:?}"
+        );
+    }
+
+    /// 非 JSON 响应不显示树形按钮
+    #[test]
+    fn json_tree_button_only_for_json() {
+        let draw = |result: &RequestResult| {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    super::ui(ui, Some(result), None, &[], None);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+        };
+        let texts = draw(&sample_result());
+        assert!(texts.iter().any(|text| text == "树形"), "{texts:?}");
+
+        let mut plain = sample_result();
+        plain.body = "plain text".to_owned();
+        plain.mime_type = Some("text/plain".to_owned());
+        let texts = draw(&plain);
+        assert!(!texts.iter().any(|text| text == "树形"), "{texts:?}");
     }
 
     #[test]
