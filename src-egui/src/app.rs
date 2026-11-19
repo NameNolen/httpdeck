@@ -42,6 +42,13 @@ enum RequestsTab {
     Globals,
 }
 
+/// 跨重启保存的界面状态
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct UiState {
+    #[serde(default, rename = "responseHeight")]
+    response_height: Option<f32>,
+}
+
 /// 一个已打开文件的标签；切换标签时用它保存 / 恢复编辑器状态
 struct Tab {
     path: PathBuf,
@@ -79,6 +86,9 @@ pub struct HttpDeckApp {
     settings_proxy: String,
     settings_cert: String,
     settings_key: String,
+    ui_state: UiState,
+    response_height: f32,
+    ui_state_dirty: bool,
     open_file: Option<PathBuf>,
     editor_text: String,
     dirty: bool,
@@ -110,6 +120,11 @@ impl HttpDeckApp {
             .enable_all()
             .build()
             .expect("创建异步运行时失败");
+        let ui_state = load_ui_state_from(&ui_state_path());
+        let response_height = ui_state
+            .response_height
+            .unwrap_or(300.0)
+            .clamp(120.0, 1400.0);
         let mut app = Self {
             state: Arc::new(httpdeck_lib::AppState::default()),
             runtime,
@@ -133,6 +148,9 @@ impl HttpDeckApp {
             settings_proxy: String::new(),
             settings_cert: String::new(),
             settings_key: String::new(),
+            ui_state,
+            response_height,
+            ui_state_dirty: false,
             open_file: None,
             editor_text: String::new(),
             dirty: false,
@@ -1386,7 +1404,7 @@ impl HttpDeckApp {
     fn response_panel(&mut self, root: &mut egui::Ui) -> egui::Rect {
         egui::Panel::bottom("response")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(self.response_height)
             .show(root, |ui| {
                 ui.take_available_space();
                 let result = self
@@ -1767,10 +1785,25 @@ impl HttpDeckApp {
             response: self.response_panel(ui),
             central: self.editor_panel(ui),
         };
+        self.track_response_height(&ctx, rects.response.height());
         self.render_file_dialog(&ctx);
         self.mcp_window(&ctx);
         self.settings_window(&ctx);
         rects
+    }
+
+    /// 记录响应面板高度；拖拽结束后写入界面状态文件
+    fn track_response_height(&mut self, ctx: &egui::Context, height: f32) {
+        if (height - self.response_height).abs() >= 1.0 {
+            self.response_height = height;
+            self.ui_state_dirty = true;
+        }
+        let pointer_down = ctx.input(|input| input.pointer.any_down());
+        if self.ui_state_dirty && !pointer_down {
+            self.ui_state_dirty = false;
+            self.ui_state.response_height = Some(self.response_height);
+            save_ui_state_to(&ui_state_path(), &self.ui_state);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -2038,6 +2071,44 @@ pub struct LayoutRects {
 impl eframe::App for HttpDeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.draw(ui);
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.ui_state.response_height = Some(self.response_height);
+        save_ui_state_to(&ui_state_path(), &self.ui_state);
+    }
+}
+
+/// 界面状态文件位置：Windows 用 %APPDATA%，其余平台用 $HOME
+fn ui_state_path() -> PathBuf {
+    // 测试不读写真实用户配置，避免污染
+    #[cfg(test)]
+    {
+        return std::env::temp_dir().join("httpdeck-ui-test-state.json");
+    }
+    #[cfg(not(test))]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("HttpDeck").join("ui.json");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".httpdeck").join("ui.json");
+    }
+    std::env::temp_dir().join("httpdeck-ui.json")
+}
+
+fn load_ui_state_from(path: &Path) -> UiState {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn save_ui_state_to(path: &Path, state: &UiState) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(path, text);
     }
 }
 
@@ -2881,6 +2952,46 @@ mod tests {
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 界面状态文件可序列化并恢复响应面板高度
+    #[test]
+    fn ui_state_round_trip() {
+        let path =
+            std::env::temp_dir().join(format!("httpdeck-ui-state-{}.json", std::process::id()));
+        let state = UiState {
+            response_height: Some(420.0),
+        };
+        save_ui_state_to(&path, &state);
+        assert_eq!(load_ui_state_from(&path).response_height, Some(420.0));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(load_ui_state_from(&path).response_height, None);
+    }
+
+    /// 响应面板首次布局应使用上次保存的高度
+    #[test]
+    fn response_panel_uses_saved_height() {
+        let mut app = HttpDeckApp::new();
+        app.response_height = 420.0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        let mut rects = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            rects = Some(app.draw(ui));
+        });
+        output.textures_delta.clear();
+        let height = rects.unwrap().response.height();
+        assert!(
+            (height - 420.0).abs() < 40.0,
+            "响应面板高度应接近保存值，实际 {height}"
+        );
     }
 
     /// 输入 `{{` 前缀时应识别补全上下文，闭合后不再补全
