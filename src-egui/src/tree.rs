@@ -12,6 +12,8 @@ pub enum TreeAction {
     Duplicate(PathBuf),
     Delete(PathBuf),
     SetPinned(PathBuf, bool),
+    /// 递归运行目录下所有 .http 文件
+    RunFolder(PathBuf),
     /// 展开 / 折叠文件的请求列表
     ToggleRequests(PathBuf),
     /// 打开文件并选中第 n 个请求
@@ -49,6 +51,14 @@ pub fn render(
         response.header_response.context_menu(|ui| {
             if ui.button("新建文件").clicked() {
                 *action = Some(TreeAction::NewFile(PathBuf::from(&node.path)));
+                ui.close();
+            }
+            if ui
+                .button("运行文件夹")
+                .on_hover_text("递归执行该目录下所有 .http 文件")
+                .clicked()
+            {
+                *action = Some(TreeAction::RunFolder(PathBuf::from(&node.path)));
                 ui.close();
             }
         });
@@ -235,7 +245,8 @@ mod tests {
             children: Vec::new(),
         };
         let ctx = egui::Context::default();
-        let draw = |events| {
+        let mut texts = Vec::new();
+        let mut draw = |events| {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -256,6 +267,14 @@ mod tests {
                 render(ui, &node, &state, &mut open, &mut action);
             });
             output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
         };
         let pos = egui::pos2(20.0, 10.0);
         draw(Vec::new());
@@ -276,6 +295,10 @@ mod tests {
         }]);
         draw(Vec::new());
         assert!(ctx.any_popup_open(), "目录右键应弹出菜单");
+        assert!(
+            texts.iter().any(|text| text == "运行文件夹"),
+            "目录菜单应包含运行文件夹: {texts:?}"
+        );
     }
 
     #[test]

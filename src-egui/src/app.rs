@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-use httpdeck_lib::models::{FileNode, HistoryEntry, KeyValue, RequestResult, RequestSummary};
+use httpdeck_lib::models::{
+    FileNode, FileRunResult, HistoryEntry, KeyValue, RequestResult, RequestSummary,
+};
 use httpdeck_lib::parser::{self, ParsedHttpFile};
 use httpdeck_lib::{history, recent, workspace};
 
@@ -17,6 +19,9 @@ enum TaskMsg {
     FileDone {
         path: String,
         result: Result<Vec<RequestResult>, String>,
+    },
+    FolderDone {
+        result: Result<Vec<FileRunResult>, String>,
     },
 }
 
@@ -405,6 +410,28 @@ impl HttpDeckApp {
         });
     }
 
+    /// 递归运行目录下所有 .http 文件
+    fn run_folder(&mut self, ctx: &egui::Context, dir: PathBuf) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let env = self.selected_env.clone();
+        let state = self.state.clone();
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.running += 1;
+        self.error = None;
+        self.status = format!("运行目录 {}…", dir.display());
+        self.runtime.spawn(async move {
+            let root = root.to_string_lossy().to_string();
+            let folder = dir.to_string_lossy().to_string();
+            let result =
+                httpdeck_lib::run_http_folder(&state, &root, &folder, env.as_deref()).await;
+            let _ = tx.send(TaskMsg::FolderDone { result });
+            ctx.request_repaint();
+        });
+    }
+
     fn poll_tasks(&mut self, ctx: &egui::Context) {
         let mut received = false;
         while let Ok(message) = self.rx.try_recv() {
@@ -428,6 +455,23 @@ impl HttpDeckApp {
                     Ok(results) => {
                         let message = format!("已执行 {} 个请求", results.len());
                         self.store_results(&path, results, Some(&message), false);
+                    }
+                    Err(err) => {
+                        self.status = "执行失败".to_owned();
+                        self.error = Some(err);
+                    }
+                },
+                TaskMsg::FolderDone { result } => match result {
+                    Ok(files) => {
+                        let file_count = files.len();
+                        let request_count: usize =
+                            files.iter().map(|file| file.results.len()).sum();
+                        let failed = files.iter().filter(|file| file.error.is_some()).count();
+                        for file in files {
+                            self.store_results(&file.file, file.results, None, false);
+                        }
+                        self.error = None;
+                        self.status = folder_run_summary(file_count, request_count, failed);
                     }
                     Err(err) => {
                         self.status = "执行失败".to_owned();
@@ -809,6 +853,10 @@ impl HttpDeckApp {
 
     fn handle_tree_action(&mut self, ctx: &egui::Context, action: tree::TreeAction) {
         let dialog = match action {
+            tree::TreeAction::RunFolder(dir) => {
+                self.run_folder(ctx, dir);
+                return;
+            }
             tree::TreeAction::ToggleRequests(path) => {
                 self.toggle_requests(&path);
                 return;
@@ -1622,6 +1670,15 @@ fn history_matches(entry: &HistoryEntry, keyword: &str) -> bool {
         || entry.status.to_string().contains(&keyword)
 }
 
+/// 目录批量运行完成后的状态栏文案
+fn folder_run_summary(file_count: usize, request_count: usize, failed: usize) -> String {
+    if failed > 0 {
+        format!("已运行 {file_count} 个文件（{failed} 个失败），共 {request_count} 个请求")
+    } else {
+        format!("已运行 {file_count} 个文件，共 {request_count} 个请求")
+    }
+}
+
 /// 文件名去空白并自动补 `.http` 后缀
 fn http_file_name(name: &str) -> String {
     let name = name.trim();
@@ -2341,6 +2398,16 @@ mod tests {
         assert_eq!(app.open_file.as_deref(), Some(a.as_path()));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目录批量运行状态栏文案应包含文件数、请求数与失败数
+    #[test]
+    fn folder_summary_mentions_failures() {
+        assert_eq!(folder_run_summary(2, 5, 0), "已运行 2 个文件，共 5 个请求");
+        assert_eq!(
+            folder_run_summary(2, 5, 1),
+            "已运行 2 个文件（1 个失败），共 5 个请求"
+        );
     }
 
     fn write_history(dir: &Path, entries: &[HistoryEntry]) {
