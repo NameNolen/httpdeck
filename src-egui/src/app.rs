@@ -1663,7 +1663,28 @@ impl HttpDeckApp {
                                 egui::pos2(viewport.left() + 1.0, y),
                                 egui::vec2(15.0, height),
                             );
-                            let color = if self.selected_request == Some(index) {
+                            let response = ui
+                                .interact(
+                                    rect,
+                                    egui::Id::new(("run_request", index)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(format!("运行 {}", request.display_name()));
+                            let hovered = response.hovered();
+                            // 悬停时高亮背景并提高图标对比度，明确可点击
+                            if hovered {
+                                painter.rect_filled(
+                                    rect,
+                                    3.0,
+                                    ui.visuals().widgets.hovered.bg_fill,
+                                );
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            } else if self.selected_request == Some(index) {
+                                painter.rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
+                            }
+                            let color = if hovered {
+                                ui.visuals().widgets.hovered.fg_stroke.color
+                            } else if self.selected_request == Some(index) {
                                 ui.visuals().strong_text_color()
                             } else {
                                 ui.visuals().weak_text_color()
@@ -1675,13 +1696,6 @@ impl HttpDeckApp {
                                 font_id.clone(),
                                 color,
                             );
-                            let response = ui
-                                .interact(
-                                    rect,
-                                    egui::Id::new(("run_request", index)),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_text(format!("运行 {}", request.display_name()));
                             if response.clicked() {
                                 run_request = Some(index);
                             }
@@ -2573,6 +2587,49 @@ mod tests {
             2,
             "每个请求行应渲染一个运行按钮，实际: {texts:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 鼠标悬停在行首运行按钮上时应切换为手型光标（并高亮）
+    #[test]
+    fn run_marker_hover_shows_hand_cursor() {
+        let (dir, a, _b) = tab_workspace("hover-run");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+
+        let ctx = egui::Context::default();
+        let mut draw = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                app.draw(ui);
+            });
+            output.textures_delta.clear();
+            let marker = output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "▶" => Some(text.pos),
+                    _ => None,
+                });
+            (output, marker)
+        };
+        let (_, marker) = draw(Vec::new());
+        let pos = marker.expect("应渲染行首运行按钮");
+        let (output, _) = draw(vec![egui::Event::PointerMoved(pos + egui::vec2(4.0, 4.0))]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "悬停运行按钮应显示手型光标"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
