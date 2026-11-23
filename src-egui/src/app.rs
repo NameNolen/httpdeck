@@ -1197,7 +1197,9 @@ impl HttpDeckApp {
                         expanded: &self.expanded_files,
                         file_requests: &self.file_requests,
                     };
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("tree_scroll")
+                        .show(ui, |ui| {
                         if !self.pinned.is_empty() {
                             ui.strong("置顶常用");
                             for rel in &self.pinned {
