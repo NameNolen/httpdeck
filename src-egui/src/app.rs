@@ -1280,6 +1280,7 @@ impl HttpDeckApp {
             .id_salt("requests")
             .show(ui, |ui| {
                 let mut clicked = None;
+                let mut run = None;
                 if let Some(parsed) = &self.parsed {
                     if parsed.requests.is_empty() {
                         ui.weak("当前文件没有可执行请求");
@@ -1289,18 +1290,31 @@ impl HttpDeckApp {
                         if let Some(result) = self.results.get(&index) {
                             text.push_str(&format!("  [{}]", result.status));
                         }
-                        if ui
-                            .selectable_label(self.selected_request == Some(index), text)
-                            .clicked()
-                        {
+                        // 截断长名称，避免撑宽右侧面板
+                        let response = ui.add(
+                            egui::Button::selectable(self.selected_request == Some(index), text)
+                                .truncate(),
+                        );
+                        if response.clicked() {
                             clicked = Some(index);
                         }
+                        // 右键菜单：直接执行该请求，无需先切换选中项
+                        response.context_menu(|ui| {
+                            if ui.button("运行").clicked() {
+                                run = Some(index);
+                                ui.close();
+                            }
+                        });
                     }
                 } else {
                     ui.weak("打开 .http 文件后显示请求列表");
                 }
                 if let Some(index) = clicked {
                     self.jump_to_request(ctx, index);
+                }
+                if let Some(index) = run {
+                    self.selected_request = Some(index);
+                    self.run_selected(ctx);
                 }
             });
     }
@@ -1351,8 +1365,13 @@ impl HttpDeckApp {
                         {
                             self.rerun_history(ctx, entry);
                         }
-                        ui.label(text)
-                            .on_hover_text(format!("{}\n{}", entry.url, entry.time));
+                        // 截断长名称，避免撑宽右侧面板
+                        ui.add(
+                            egui::Label::new(text)
+                                .truncate()
+                                .sense(egui::Sense::hover()),
+                        )
+                        .on_hover_text(format!("{}\n{}", entry.url, entry.time));
                     });
                 }
             });
@@ -3371,6 +3390,119 @@ mod tests {
         app.clear_history();
         assert!(app.history.is_empty());
         assert!(history::list(&dir).is_empty(), "清空应写入磁盘");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 切换到历史标签后，右侧面板不应被长文本撑宽而覆盖编辑区
+    #[test]
+    fn history_tab_keeps_panel_width() {
+        let (dir, a, _b) = tab_workspace("hist-width");
+        let long_name = "超长请求名称".repeat(20);
+        let long_url = format!("https://example.com/{}", "very-long-path/".repeat(20));
+        write_history(&dir, &[sample_history(&a, 0, &long_name, &long_url)]);
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+        app.requests_tab = RequestsTab::History;
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 820.0),
+            )),
+            ..Default::default()
+        };
+        for frame in 0..5 {
+            let mut rects = None;
+            let mut output = ctx.run_ui(input.clone(), |ui| {
+                rects = Some(app.draw(ui));
+            });
+            output.textures_delta.clear();
+            let rects = rects.expect("draw 未执行");
+            println!("history frame {frame}: {rects:?}");
+            assert!(
+                rects.requests.width() < 400.0,
+                "历史面板不应被长文本撑宽: {:?}",
+                rects.requests
+            );
+            assert!(
+                rects.central.right() <= rects.requests.left() + 1.0,
+                "历史面板不应覆盖编辑区: {:?} vs {:?}",
+                rects.central,
+                rects.requests
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 请求列表项右键应弹出包含「运行」的菜单
+    #[test]
+    fn requests_list_has_run_context_menu() {
+        let (dir, a, _b) = tab_workspace("req-menu");
+        let mut app = HttpDeckApp::new();
+        app.load_workspace(dir.clone());
+        app.load_file(a.clone());
+
+        let ctx = egui::Context::default();
+        let mut draw = |events: Vec<egui::Event>| -> (Vec<String>, Option<egui::Pos2>) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 820.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut rects = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                rects = Some(app.draw(ui));
+            });
+            output.textures_delta.clear();
+            let requests_left = rects.map_or(0.0, |rects| rects.requests.left());
+            // 只在右侧请求面板范围内找列表项文本，排除编辑区里的同一行
+            let item_pos = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text().starts_with("GET") && text.pos.x >= requests_left =>
+                {
+                    Some(text.pos + egui::vec2(4.0, 4.0))
+                }
+                _ => None,
+            });
+            let texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            (texts, item_pos)
+        };
+        let (_, item_pos) = draw(Vec::new());
+        let pos = item_pos.expect("未找到请求列表项");
+        draw(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        draw(vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        let (texts, _) = draw(Vec::new());
+        assert!(ctx.any_popup_open(), "请求右键应弹出菜单");
+        assert!(
+            texts.iter().any(|text| text == "运行"),
+            "请求菜单应包含运行: {texts:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
