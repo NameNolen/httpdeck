@@ -354,4 +354,111 @@ mod tests {
             "展开后应显示请求行号，实际渲染: {texts:?}"
         );
     }
+
+    fn dir_node(name: &str, path: &str, children: Vec<FileNode>) -> FileNode {
+        FileNode {
+            name: name.to_owned(),
+            path: path.to_owned(),
+            rel_path: name.to_owned(),
+            is_dir: true,
+            children,
+        }
+    }
+
+    /// 不同路径下的同名目录应独立展开/折叠
+    #[test]
+    fn same_named_dirs_toggle_independently() {
+        let tree = dir_node(
+            "root",
+            "/tmp/root",
+            vec![
+                dir_node("api", "/tmp/root/api", vec![file_node("login.http")]),
+                dir_node(
+                    "v1",
+                    "/tmp/root/v1",
+                    vec![dir_node(
+                        "api",
+                        "/tmp/root/v1/api",
+                        vec![file_node("other.http")],
+                    )],
+                ),
+            ],
+        );
+        let ctx = egui::Context::default();
+        let draw = |events| -> Vec<(String, egui::Pos2)> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 400.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let state = TreeState {
+                    pinned: &[],
+                    selected: None,
+                    expanded: &HashSet::new(),
+                    file_requests: &HashMap::new(),
+                };
+                let mut open = None;
+                let mut action = None;
+                render(ui, &tree, &state, &mut open, &mut action);
+            });
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.pos)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let texts = draw(Vec::new());
+        assert!(
+            texts.iter().filter(|(t, _)| t == "api").count() == 2,
+            "两个同名目录都应渲染: {texts:?}"
+        );
+        assert!(texts.iter().any(|(t, _)| t == "login.http"));
+        assert!(texts.iter().any(|(t, _)| t == "other.http"));
+
+        // 点击第一个 api 目录折叠
+        let pos = texts
+            .iter()
+            .find(|(t, _)| t == "api")
+            .map(|(_, pos)| *pos)
+            .unwrap()
+            + egui::vec2(10.0, 5.0);
+        draw(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        draw(vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        // 折叠有动画，多跑几帧等动画结束
+        let mut texts = Vec::new();
+        for _ in 0..40 {
+            texts = draw(Vec::new());
+        }
+
+        assert!(
+            !texts.iter().any(|(t, _)| t == "login.http"),
+            "被折叠目录的子文件应隐藏: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|(t, _)| t == "other.http"),
+            "同名但不同路径的目录不应一起折叠: {texts:?}"
+        );
+    }
 }

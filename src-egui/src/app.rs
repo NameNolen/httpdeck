@@ -58,17 +58,25 @@ struct Tab {
     results: HashMap<usize, RequestResult>,
 }
 
+/// 一个已加载的工作区文件夹；可同时加载多个，同名文件夹也能共存
+struct Workspace {
+    root: PathBuf,
+    tree: FileNode,
+    envs: Vec<String>,
+    selected_env: Option<String>,
+    pinned: Vec<String>,
+}
+
 pub struct HttpDeckApp {
     state: Arc<httpdeck_lib::AppState>,
     runtime: tokio::runtime::Runtime,
     tx: Sender<TaskMsg>,
     rx: Receiver<TaskMsg>,
 
-    root: Option<PathBuf>,
-    tree: Option<FileNode>,
-    envs: Vec<String>,
-    selected_env: Option<String>,
-    pinned: Vec<String>,
+    /// 已加载的工作区列表，目录树中每个工作区一个根节点
+    workspaces: Vec<Workspace>,
+    /// 历史/变量面板当前对应的工作区，用于检测活动工作区切换
+    panel_root: Option<PathBuf>,
 
     /// 已打开的文件标签，`active_tab` 指向当前显示的那个
     tabs: Vec<Tab>,
@@ -130,11 +138,8 @@ impl HttpDeckApp {
             runtime,
             tx,
             rx,
-            root: None,
-            tree: None,
-            envs: Vec::new(),
-            selected_env: None,
-            pinned: Vec::new(),
+            workspaces: Vec::new(),
+            panel_root: None,
             tabs: Vec::new(),
             active_tab: None,
             requests_tab: RequestsTab::Requests,
@@ -187,7 +192,12 @@ impl HttpDeckApp {
         app
     }
 
+    /// 加载一个工作区文件夹；已加载的不会重复添加，多个工作区可同时存在
     fn load_workspace(&mut self, dir: PathBuf) {
+        if self.workspace_index_for(&dir).is_some() {
+            self.status = format!("工作区已加载 {}", dir.display());
+            return;
+        }
         recent::record(&dir);
         let config = workspace::load_config(&dir);
         let envs = read_env_names(&dir);
@@ -195,21 +205,64 @@ impl HttpDeckApp {
             .selected_env
             .filter(|env| envs.iter().any(|name| name == env))
             .or_else(|| envs.first().cloned());
-        self.tree = Some(workspace::scan_tree(&dir));
-        self.envs = envs;
-        self.selected_env = selected_env;
-        self.pinned = workspace::valid_pinned(&dir, &config.pinned);
-        self.root = Some(dir);
-        self.tabs.clear();
-        self.active_tab = None;
-        self.open_file = None;
-        self.editor_text.clear();
-        self.parsed = None;
-        self.selected_request = None;
-        self.results.clear();
-        self.dirty = false;
+        let tree = workspace::scan_tree(&dir);
+        let pinned = workspace::valid_pinned(&dir, &config.pinned);
+        self.workspaces.push(Workspace {
+            root: dir,
+            tree,
+            envs,
+            selected_env,
+            pinned,
+        });
         self.error = None;
         self.status = "工作区已加载".to_owned();
+        self.sync_panels();
+    }
+
+    /// 从列表中移除工作区；已打开的标签保留，避免丢失未保存修改
+    fn close_workspace(&mut self, root: &Path) {
+        self.workspaces.retain(|ws| ws.root != root);
+        self.status = format!("已关闭工作区 {}", root.display());
+        self.sync_panels();
+    }
+
+    fn workspace_index_for(&self, path: &Path) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|ws| path.starts_with(&ws.root))
+    }
+
+    /// 活动工作区：优先当前打开文件所属的工作区，否则最近加载的那个
+    fn active_workspace_index(&self) -> Option<usize> {
+        if let Some(file) = &self.open_file {
+            if let Some(index) = self.workspace_index_for(file) {
+                return Some(index);
+            }
+        }
+        self.workspaces.len().checked_sub(1)
+    }
+
+    fn active_root(&self) -> Option<PathBuf> {
+        self.active_workspace_index()
+            .map(|index| self.workspaces[index].root.clone())
+    }
+
+    /// 运行请求时的工作区根目录与环境，按文件归属解析
+    fn run_context(&self, file: &Path) -> Option<(PathBuf, Option<String>)> {
+        let index = self
+            .workspace_index_for(file)
+            .or_else(|| self.active_workspace_index())?;
+        let ws = &self.workspaces[index];
+        Some((ws.root.clone(), ws.selected_env.clone()))
+    }
+
+    /// 活动工作区变化时刷新历史 / 变量面板
+    fn sync_panels(&mut self) {
+        let root = self.active_root();
+        if self.panel_root == root {
+            return;
+        }
+        self.panel_root = root;
         self.refresh_history();
         self.refresh_globals();
     }
@@ -399,14 +452,12 @@ impl HttpDeckApp {
     }
 
     fn run_selected(&mut self, ctx: &egui::Context) {
-        let (Some(root), Some(file), Some(index)) = (
-            self.root.clone(),
-            self.open_file.clone(),
-            self.selected_request,
-        ) else {
+        let (Some(file), Some(index)) = (self.open_file.clone(), self.selected_request) else {
             return;
         };
-        let env = self.selected_env.clone();
+        let Some((root, env)) = self.run_context(&file) else {
+            return;
+        };
         let state = self.state.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -424,10 +475,12 @@ impl HttpDeckApp {
     }
 
     fn run_file(&mut self, ctx: &egui::Context) {
-        let (Some(root), Some(file)) = (self.root.clone(), self.open_file.clone()) else {
+        let Some(file) = self.open_file.clone() else {
             return;
         };
-        let env = self.selected_env.clone();
+        let Some((root, env)) = self.run_context(&file) else {
+            return;
+        };
         let state = self.state.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -445,10 +498,9 @@ impl HttpDeckApp {
 
     /// 递归运行目录下所有 .http 文件
     fn run_folder(&mut self, ctx: &egui::Context, dir: PathBuf) {
-        let Some(root) = self.root.clone() else {
+        let Some((root, env)) = self.run_context(&dir) else {
             return;
         };
-        let env = self.selected_env.clone();
         let state = self.state.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
@@ -715,14 +767,14 @@ impl HttpDeckApp {
 
     /// 从磁盘重新载入工作区请求历史
     fn refresh_history(&mut self) {
-        self.history = match &self.root {
+        self.history = match &self.active_root() {
             Some(root) => history::list(root),
             None => Vec::new(),
         };
     }
 
     fn clear_history(&mut self) {
-        if let Some(root) = &self.root {
+        if let Some(root) = &self.active_root() {
             history::clear(root);
         }
         self.refresh_history();
@@ -731,7 +783,7 @@ impl HttpDeckApp {
 
     /// 从工作区读取 client.global 变量快照
     fn refresh_globals(&mut self) {
-        self.globals = match &self.root {
+        self.globals = match &self.active_root() {
             Some(root) => {
                 let workspace = root.to_string_lossy().to_string();
                 httpdeck_lib::get_globals_for(&self.state, &workspace).unwrap_or_default()
@@ -741,7 +793,7 @@ impl HttpDeckApp {
     }
 
     fn clear_globals(&mut self) {
-        let Some(root) = self.root.clone() else {
+        let Some(root) = self.active_root() else {
             return;
         };
         let workspace = root.to_string_lossy().to_string();
@@ -757,7 +809,7 @@ impl HttpDeckApp {
 
     /// 打开历史对应的文件并选中该请求；失败时返回 false
     fn open_history_entry(&mut self, entry: &HistoryEntry) -> bool {
-        let Some(root) = self.root.clone() else {
+        let Some(root) = self.active_root() else {
             return false;
         };
         let path = PathBuf::from(&entry.file);
@@ -868,15 +920,16 @@ impl HttpDeckApp {
     }
 
     fn refresh_tree(&mut self) {
-        if let Some(root) = &self.root {
-            self.tree = Some(workspace::scan_tree(root));
+        for ws in &mut self.workspaces {
+            ws.tree = workspace::scan_tree(&ws.root);
         }
     }
 
     fn set_pinned(&mut self, path: &Path, pinned: bool) {
-        let Some(root) = self.root.clone() else {
+        let Some(index) = self.workspace_index_for(path) else {
             return;
         };
+        let root = self.workspaces[index].root.clone();
         let rel = workspace::rel_path(&root, path);
         let mut config = workspace::load_config(&root);
         if pinned {
@@ -888,7 +941,7 @@ impl HttpDeckApp {
         }
         match workspace::save_config(&root, &config) {
             Ok(()) => {
-                self.pinned = workspace::valid_pinned(&root, &config.pinned);
+                self.workspaces[index].pinned = workspace::valid_pinned(&root, &config.pinned);
                 self.error = None;
                 self.status = if pinned {
                     format!("已置顶 {rel}")
@@ -1087,30 +1140,35 @@ impl HttpDeckApp {
                             self.load_workspace(dir);
                         }
                     }
-                    if let Some(root) = &self.root {
-                        ui.weak(root.display().to_string());
+                    let active_workspace = self.active_workspace_index();
+                    if let Some(index) = active_workspace {
+                        ui.weak(self.workspaces[index].root.display().to_string());
                     }
                     ui.separator();
 
                     ui.label("环境");
-                    let selected_text =
-                        self.selected_env.clone().unwrap_or_else(|| "无".to_owned());
+                    let selected_env = active_workspace
+                        .and_then(|index| self.workspaces[index].selected_env.clone());
+                    let envs = active_workspace
+                        .map(|index| self.workspaces[index].envs.clone())
+                        .unwrap_or_default();
+                    let mut env_selection = None;
                     egui::ComboBox::from_id_salt("env")
-                        .selected_text(selected_text)
+                        .selected_text(selected_env.clone().unwrap_or_else(|| "无".to_owned()))
                         .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(self.selected_env.is_none(), "无")
-                                .clicked()
-                            {
-                                self.selected_env = None;
+                            if ui.selectable_label(selected_env.is_none(), "无").clicked() {
+                                env_selection = Some(None);
                             }
-                            for env in &self.envs {
-                                let selected = self.selected_env.as_deref() == Some(env.as_str());
+                            for env in &envs {
+                                let selected = selected_env.as_deref() == Some(env.as_str());
                                 if ui.selectable_label(selected, env).clicked() {
-                                    self.selected_env = Some(env.clone());
+                                    env_selection = Some(Some(env.clone()));
                                 }
                             }
                         });
+                    if let (Some(index), Some(selection)) = (active_workspace, env_selection) {
+                        self.workspaces[index].selected_env = selection;
+                    }
                     ui.separator();
 
                     let can_run = self.selected_request.is_some()
@@ -1180,55 +1238,87 @@ impl HttpDeckApp {
                 ui.horizontal(|ui| {
                     ui.strong("目录");
                     if ui.small_button("刷新").clicked() {
-                        if let Some(root) = &self.root {
-                            self.tree = Some(workspace::scan_tree(root));
-                        }
+                        self.refresh_tree();
                     }
                 });
                 ui.separator();
 
-                let tree = self.tree.take();
                 let mut action = None;
                 let mut open = None;
-                if let (Some(workspace_root), Some(node)) = (self.root.as_ref(), tree.as_ref()) {
-                    let state = tree::TreeState {
-                        pinned: &self.pinned,
-                        selected: self.open_file.as_deref(),
-                        expanded: &self.expanded_files,
-                        file_requests: &self.file_requests,
-                    };
-                    egui::ScrollArea::vertical()
-                        .id_salt("tree_scroll")
-                        .show(ui, |ui| {
-                        if !self.pinned.is_empty() {
-                            ui.strong("置顶常用");
-                            for rel in &self.pinned {
-                                let path = workspace_root.join(rel);
-                                let node = FileNode {
-                                    name: path
-                                        .file_name()
-                                        .map(|name| name.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| rel.clone()),
-                                    path: path.to_string_lossy().into_owned(),
-                                    rel_path: rel.clone(),
-                                    is_dir: false,
-                                    children: Vec::new(),
-                                };
-                                tree::render_file(ui, &node, true, &state, &mut open, &mut action);
-                            }
-                            ui.separator();
+                let mut close_root = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("tree_scroll")
+                    .show(ui, |ui| {
+                        for ws in &self.workspaces {
+                            let state = tree::TreeState {
+                                pinned: &ws.pinned,
+                                selected: self.open_file.as_deref(),
+                                expanded: &self.expanded_files,
+                                file_requests: &self.file_requests,
+                            };
+                            let header = egui::CollapsingHeader::new(&ws.tree.name)
+                                .id_salt(&ws.root)
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    if !ws.pinned.is_empty() {
+                                        ui.strong("置顶常用");
+                                        for rel in &ws.pinned {
+                                            let rel_path =
+                                                rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+                                            let path = ws.root.join(&rel_path);
+                                            let node = FileNode {
+                                                name: path
+                                                    .file_name()
+                                                    .map(|name| name.to_string_lossy().into_owned())
+                                                    .unwrap_or_else(|| rel.clone()),
+                                                path: path.to_string_lossy().into_owned(),
+                                                rel_path: rel.clone(),
+                                                is_dir: false,
+                                                children: Vec::new(),
+                                            };
+                                            tree::render_file(
+                                                ui,
+                                                &node,
+                                                true,
+                                                &state,
+                                                &mut open,
+                                                &mut action,
+                                            );
+                                        }
+                                        ui.separator();
+                                    }
+                                    for child in &ws.tree.children {
+                                        tree::render(ui, child, &state, &mut open, &mut action);
+                                    }
+                                });
+                            header
+                                .header_response
+                                .on_hover_text(ws.root.display().to_string())
+                                .context_menu(|ui| {
+                                    if ui.button("新建文件").clicked() {
+                                        action = Some(tree::TreeAction::NewFile(ws.root.clone()));
+                                        ui.close();
+                                    }
+                                    if ui.button("运行文件夹").clicked() {
+                                        action = Some(tree::TreeAction::RunFolder(ws.root.clone()));
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if ui.button("关闭工作区").clicked() {
+                                        close_root = Some(ws.root.clone());
+                                        ui.close();
+                                    }
+                                });
                         }
-                        tree::render(ui, node, &state, &mut open, &mut action);
                     });
-                }
-                self.tree = tree;
                 if let Some(path) = open {
                     self.load_file(path);
                 }
-                // 注意要在恢复 self.tree 之后再处理动作，
-                // 否则动作里的 refresh_tree 会被上面的旧树覆盖
                 if let Some(action) = action {
                     self.handle_tree_action(&ui.ctx().clone(), action);
+                }
+                if let Some(root) = close_root {
+                    self.close_workspace(&root);
                 }
             })
             .response
@@ -1813,6 +1903,7 @@ impl HttpDeckApp {
         let ctx = ui.ctx().clone();
         self.poll_tasks(&ctx);
         self.handle_shortcuts(&ctx);
+        self.sync_panels();
         let rects = LayoutRects {
             toolbar: self.toolbar(ui),
             tree: self.tree_panel(ui),
@@ -1843,9 +1934,8 @@ impl HttpDeckApp {
 
     fn open_settings(&mut self) {
         let config = self
-            .root
-            .as_ref()
-            .map(|root| workspace::load_config(root))
+            .active_root()
+            .map(|root| workspace::load_config(&root))
             .unwrap_or_default();
         self.settings_proxy = config.proxy.unwrap_or_default();
         self.settings_cert = config.client_cert.unwrap_or_default();
@@ -1854,7 +1944,7 @@ impl HttpDeckApp {
     }
 
     fn save_settings(&mut self) {
-        let Some(root) = self.root.clone() else {
+        let Some(root) = self.active_root() else {
             return;
         };
         if let Some(message) = proxy_problem(&self.settings_proxy) {
@@ -2611,6 +2701,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 后打开的同名工作区不能覆盖先打开的工作区，请求也应使用各自的工作区配置
+    #[test]
+    fn same_named_workspaces_stay_visible_with_independent_run_contexts() {
+        let base = std::env::temp_dir().join(format!(
+            "httpdeck-egui-multi-workspace-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let root_a = base.join("a").join("api");
+        let root_b = base.join("b").join("api");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let file_a = root_a.join("a.http");
+        let file_b = root_b.join("b.http");
+        std::fs::write(&file_a, "GET https://a.example.com\n").unwrap();
+        std::fs::write(&file_b, "GET https://b.example.com\n").unwrap();
+
+        let mut app = HttpDeckApp::new();
+        app.workspaces.clear();
+        app.load_workspace(root_a.clone());
+        app.load_workspace(root_b.clone());
+        assert_eq!(app.workspaces.len(), 2, "两个同名工作区应同时保留");
+
+        app.load_file(file_a.clone());
+        assert_eq!(
+            app.run_context(&file_a).map(|(root, _)| root),
+            Some(root_a.clone())
+        );
+        app.load_file(file_b.clone());
+        assert_eq!(
+            app.run_context(&file_b).map(|(root, _)| root),
+            Some(root_b.clone())
+        );
+
+        let ctx = egui::Context::default();
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 820.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.draw(ui);
+                },
+            );
+            output.textures_delta.clear();
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+        }
+        assert_eq!(
+            texts.iter().filter(|text| text.as_str() == "api").count(),
+            2,
+            "目录树应同时显示两个 api 根目录: {texts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 鼠标悬停在行首运行按钮上时应切换为手型光标（并高亮）
     #[test]
     fn run_marker_hover_shows_hand_cursor() {
@@ -2794,15 +2951,16 @@ mod tests {
         let file = dir.join("demo.http");
         std::fs::write(&file, "GET https://example.com\n").unwrap();
         let mut app = HttpDeckApp::new();
-        app.root = Some(dir.clone());
+        app.workspaces.clear();
+        app.load_workspace(dir.clone());
         let ctx = egui::Context::default();
 
         app.handle_tree_action(&ctx, tree::TreeAction::SetPinned(file.clone(), true));
-        assert_eq!(app.pinned, vec!["demo.http"]);
+        assert_eq!(app.workspaces[0].pinned, vec!["demo.http"]);
         assert_eq!(workspace::load_config(&dir).pinned, vec!["demo.http"]);
 
         app.handle_tree_action(&ctx, tree::TreeAction::SetPinned(file, false));
-        assert!(app.pinned.is_empty());
+        assert!(app.workspaces[0].pinned.is_empty());
         assert!(workspace::load_config(&dir).pinned.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
