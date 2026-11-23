@@ -33,18 +33,36 @@ fn main() -> eframe::Result<()> {
 
 /// egui 自带字体不含中文，这里加载系统中文字体作为兜底
 fn install_cjk_fonts(ctx: &egui::Context) {
-    let candidates = [
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simsun.ttc",
-    ];
+    let mut fonts = egui::FontDefinitions::default();
+    let cjk = install_font(
+        &mut fonts,
+        "cjk",
+        &[
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+        ],
+    );
+    if !cjk {
+        return;
+    }
+    // 中文字体不含 ▶ ▸ ▾ ✖ 等几何符号，追加 Segoe UI Symbol 防止显示为方框
+    install_font(
+        &mut fonts,
+        "symbols",
+        &["C:/Windows/Fonts/seguisym.ttf"],
+    );
+    ctx.set_fonts(fonts);
+}
+
+/// 依次尝试候选路径，加载第一个可读字体并追加为两个字体族的兜底
+fn install_font(fonts: &mut egui::FontDefinitions, name: &str, candidates: &[&str]) -> bool {
     for path in candidates {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert(
-            "cjk".to_owned(),
+            name.to_owned(),
             Arc::new(egui::FontData::from_owned(bytes)),
         );
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
@@ -52,9 +70,32 @@ fn install_cjk_fonts(ctx: &egui::Context) {
                 .families
                 .entry(family)
                 .or_default()
-                .push("cjk".to_owned());
+                .push(name.to_owned());
         }
-        ctx.set_fonts(fonts);
-        return;
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    /// 图标字符必须有可用字形，否则界面会显示为方框
+    #[test]
+    fn symbol_glyphs_are_available() {
+        let ctx = egui::Context::default();
+        super::install_cjk_fonts(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        output.textures_delta.clear();
+        let ok = ctx.fonts_mut(|fonts| {
+            fonts.has_glyphs(
+                &egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                "▸▾✖▶★☆●×",
+            ) && fonts.has_glyphs(
+                &egui::FontId::new(14.0, egui::FontFamily::Monospace),
+                "▸▾✖▶★☆●×",
+            )
+        });
+        assert!(ok, "图标字符应能渲染，否则会显示为方框");
     }
 }
+
