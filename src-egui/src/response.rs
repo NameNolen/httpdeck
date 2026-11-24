@@ -1,5 +1,10 @@
+use std::collections::HashSet;
+
 use egui::{Color32, RichText};
 use httpdeck_lib::models::RequestResult;
+
+/// 执行中状态使用的强调色
+const RUNNING_COLOR: Color32 = Color32::from_rgb(90, 170, 230);
 
 const BODY_PREVIEW_LIMIT: usize = 200_000;
 /// 超过该大小关闭美化，并按行虚拟滚动
@@ -28,11 +33,19 @@ pub fn ui(
     error: Option<&str>,
     results: &[(usize, &RequestResult)],
     selected: Option<usize>,
+    running: &HashSet<usize>,
+    file_running: bool,
 ) -> Option<usize> {
     let mut clicked_result = None;
     ui.horizontal(|ui| {
         ui.strong("响应");
-        if let Some(result) = result {
+        let selected_running = file_running
+            || selected.is_some_and(|index| running.contains(&index))
+            || result.is_some_and(|item| running.contains(&item.request_index));
+        if selected_running {
+            ui.spinner();
+            ui.colored_label(RUNNING_COLOR, "执行中…");
+        } else if let Some(result) = result {
             let color = if result.error.is_some() {
                 Color32::from_rgb(230, 100, 100)
             } else if result.status >= 400 {
@@ -55,16 +68,26 @@ pub fn ui(
     ui.separator();
 
     // 多结果切换条：整个文件运行后可在不同请求的结果之间切换
-    if results.len() > 1 {
+    if results.len() > 1 || !running.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.weak("全部结果");
             for (index, item) in results {
-                let label = format!("#{} {} {}", index + 1, item.method, item.status);
+                let is_running = running.contains(index);
+                let label = if is_running {
+                    format!("#{} {} 执行中…", index + 1, item.method)
+                } else {
+                    format!("#{} {} {}", index + 1, item.method, item.status)
+                };
                 let response = ui
                     .selectable_label(selected == Some(*index), label)
                     .on_hover_text(format!("{} {}", item.method, item.name));
                 if response.clicked() {
                     clicked_result = Some(*index);
+                }
+            }
+            for index in running {
+                if !results.iter().any(|(existing, _)| existing == index) {
+                    ui.colored_label(RUNNING_COLOR, format!("#{} 执行中…", index + 1));
                 }
             }
         });
@@ -512,6 +535,7 @@ fn format_size(size: usize) -> String {
 mod tests {
     use super::*;
     use httpdeck_lib::models::{KeyValue, TestResult};
+    use std::collections::HashSet;
 
     fn sample_result() -> RequestResult {
         RequestResult {
@@ -638,6 +662,8 @@ mod tests {
                     None,
                     &[(0, &first), (1, &second)],
                     Some(0),
+                    &HashSet::new(),
+                    false,
                 );
             },
         );
@@ -653,6 +679,58 @@ mod tests {
         assert!(
             texts.iter().any(|text| text.contains("#2 GET 404")),
             "应渲染第二个结果的可切换标签，实际: {texts:?}"
+        );
+    }
+
+    /// 执行中的请求应把旧状态替换为“执行中”，而不是继续显示上一次的状态码
+    #[test]
+    fn running_request_replaces_stale_status() {
+        let ctx = egui::Context::default();
+        let first = sample_result();
+        let mut second = sample_result();
+        second.request_index = 1;
+        second.method = "GET".to_owned();
+        let running: HashSet<usize> = [1].into_iter().collect();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                super::ui(
+                    ui,
+                    Some(&second),
+                    None,
+                    &[(0, &first), (1, &second)],
+                    Some(1),
+                    &running,
+                    false,
+                );
+            },
+        );
+        output.textures_delta.clear();
+        let texts: Vec<String> = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "执行中…"),
+            "响应标题应显示执行中: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("#2 GET 执行中…")),
+            "结果切换条应标记正在执行的请求: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("#2 GET 200")),
+            "执行中不应继续显示旧状态: {texts:?}"
         );
     }
 
@@ -675,7 +753,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                super::ui(ui, Some(&result), None, &[], None);
+                super::ui(ui, Some(&result), None, &[], None, &HashSet::new(), false);
             },
         );
         output.textures_delta.clear();
@@ -711,7 +789,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    super::ui(ui, Some(result), None, &[], None);
+                    super::ui(ui, Some(result), None, &[], None, &HashSet::new(), false);
                 },
             );
             output.textures_delta.clear();
@@ -748,7 +826,7 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                super::ui(ui, Some(&result), None, &[], None);
+                super::ui(ui, Some(&result), None, &[], None, &HashSet::new(), false);
             });
             output.textures_delta.clear();
             output
@@ -808,7 +886,7 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                super::ui(ui, Some(&result), None, &[], None);
+                super::ui(ui, Some(&result), None, &[], None, &HashSet::new(), false);
             },
         );
         output.textures_delta.clear();

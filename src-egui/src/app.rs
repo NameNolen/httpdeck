@@ -14,6 +14,7 @@ use crate::{response, tree};
 enum TaskMsg {
     Done {
         path: String,
+        index: usize,
         result: Result<RequestResult, String>,
     },
     FileDone {
@@ -115,6 +116,10 @@ pub struct HttpDeckApp {
     file_requests: HashMap<String, Vec<RequestSummary>>,
 
     running: usize,
+    /// 正在执行的单个请求（文件绝对路径, 请求索引），用于界面显示执行中状态
+    running_requests: HashSet<(String, usize)>,
+    /// 正在整体执行的文件（绝对路径）
+    running_files: HashSet<String>,
     status: String,
     error: Option<String>,
     file_dialog: Option<FileDialog>,
@@ -171,6 +176,8 @@ impl HttpDeckApp {
             expanded_files: HashSet::new(),
             file_requests: HashMap::new(),
             running: 0,
+            running_requests: HashSet::new(),
+            running_files: HashSet::new(),
             status: String::new(),
             error: None,
             file_dialog: None,
@@ -254,6 +261,12 @@ impl HttpDeckApp {
             .or_else(|| self.active_workspace_index())?;
         let ws = &self.workspaces[index];
         Some((ws.root.clone(), ws.selected_env.clone()))
+    }
+
+    /// 指定文件的某个请求是否正在执行
+    fn request_is_running(&self, file: &Path, index: usize) -> bool {
+        self.running_requests
+            .contains(&(file.to_string_lossy().to_string(), index))
     }
 
     /// 活动工作区变化时刷新历史 / 变量面板
@@ -461,15 +474,21 @@ impl HttpDeckApp {
         let state = self.state.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        let file_key = file.to_string_lossy().to_string();
         self.running += 1;
+        self.running_requests.insert((file_key.clone(), index));
         self.error = None;
         self.status = format!("运行中：第 {} 个请求…", index + 1);
         self.runtime.spawn(async move {
             let root = root.to_string_lossy().to_string();
-            let file = file.to_string_lossy().to_string();
             let result =
-                httpdeck_lib::run_single_request(&state, &root, &file, index, env.as_deref()).await;
-            let _ = tx.send(TaskMsg::Done { path: file, result });
+                httpdeck_lib::run_single_request(&state, &root, &file_key, index, env.as_deref())
+                    .await;
+            let _ = tx.send(TaskMsg::Done {
+                path: file_key,
+                index,
+                result,
+            });
             ctx.request_repaint();
         });
     }
@@ -484,14 +503,19 @@ impl HttpDeckApp {
         let state = self.state.clone();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+        let file_key = file.to_string_lossy().to_string();
         self.running += 1;
+        self.running_files.insert(file_key.clone());
         self.error = None;
         self.status = "运行整个文件…".to_owned();
         self.runtime.spawn(async move {
             let root = root.to_string_lossy().to_string();
-            let file = file.to_string_lossy().to_string();
-            let result = httpdeck_lib::run_http_file(&state, &root, &file, env.as_deref()).await;
-            let _ = tx.send(TaskMsg::FileDone { path: file, result });
+            let result =
+                httpdeck_lib::run_http_file(&state, &root, &file_key, env.as_deref()).await;
+            let _ = tx.send(TaskMsg::FileDone {
+                path: file_key,
+                result,
+            });
             ctx.request_repaint();
         });
     }
@@ -523,29 +547,42 @@ impl HttpDeckApp {
             received = true;
             self.running = self.running.saturating_sub(1);
             match message {
-                TaskMsg::Done { path, result } => match result {
-                    Ok(result) => {
-                        let message = format!(
-                            "{} {} · {} · {} ms",
-                            result.method, result.status, result.status_text, result.duration_ms
-                        );
-                        self.store_results(&path, vec![result], Some(&message), true);
+                TaskMsg::Done {
+                    path,
+                    index,
+                    result,
+                } => {
+                    self.running_requests.remove(&(path.clone(), index));
+                    match result {
+                        Ok(result) => {
+                            let message = format!(
+                                "{} {} · {} · {} ms",
+                                result.method,
+                                result.status,
+                                result.status_text,
+                                result.duration_ms
+                            );
+                            self.store_results(&path, vec![result], Some(&message), true);
+                        }
+                        Err(err) => {
+                            self.status = "执行失败".to_owned();
+                            self.error = Some(err);
+                        }
                     }
-                    Err(err) => {
-                        self.status = "执行失败".to_owned();
-                        self.error = Some(err);
+                }
+                TaskMsg::FileDone { path, result } => {
+                    self.running_files.remove(&path);
+                    match result {
+                        Ok(results) => {
+                            let message = format!("已执行 {} 个请求", results.len());
+                            self.store_results(&path, results, Some(&message), false);
+                        }
+                        Err(err) => {
+                            self.status = "执行失败".to_owned();
+                            self.error = Some(err);
+                        }
                     }
-                },
-                TaskMsg::FileDone { path, result } => match result {
-                    Ok(results) => {
-                        let message = format!("已执行 {} 个请求", results.len());
-                        self.store_results(&path, results, Some(&message), false);
-                    }
-                    Err(err) => {
-                        self.status = "执行失败".to_owned();
-                        self.error = Some(err);
-                    }
-                },
+                }
                 TaskMsg::McpDone(result) => {
                     self.mcp_busy = false;
                     match result {
@@ -1195,6 +1232,13 @@ impl HttpDeckApp {
                     }
                     if self.running > 0 {
                         ui.spinner();
+                        let label = if self.running > 1 {
+                            format!("运行中 ×{}", self.running)
+                        } else {
+                            "运行中".to_owned()
+                        };
+                        ui.colored_label(ui.visuals().hyperlink_color, label)
+                            .on_hover_text(self.status.as_str());
                     }
                     ui.separator();
                     if ui
@@ -1379,7 +1423,13 @@ impl HttpDeckApp {
                     }
                     for (index, request) in parsed.requests.iter().enumerate() {
                         let mut text = format!("{}  {}", request.method, request.display_name());
-                        if let Some(result) = self.results.get(&index) {
+                        let running = self
+                            .open_file
+                            .as_deref()
+                            .is_some_and(|file| self.request_is_running(file, index));
+                        if running {
+                            text.push_str("  [执行中]");
+                        } else if let Some(result) = self.results.get(&index) {
                             text.push_str(&format!("  [{}]", result.status));
                         }
                         // 截断长名称，避免撑宽右侧面板
@@ -1527,12 +1577,31 @@ impl HttpDeckApp {
                     .map(|(index, item)| (*index, item))
                     .collect();
                 all.sort_by_key(|(index, _)| *index);
+                let file_key = self
+                    .open_file
+                    .as_ref()
+                    .map(|file| file.to_string_lossy().to_string());
+                let running: HashSet<usize> = file_key
+                    .as_ref()
+                    .map(|key| {
+                        self.running_requests
+                            .iter()
+                            .filter(|(path, _)| path == key)
+                            .map(|(_, index)| *index)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let file_running = file_key
+                    .as_ref()
+                    .is_some_and(|key| self.running_files.contains(key));
                 let clicked = response::ui(
                     ui,
                     result,
                     self.error.as_deref(),
                     &all,
                     self.selected_request,
+                    &running,
+                    file_running,
                 );
                 if let Some(index) = clicked {
                     self.selected_request = Some(index);
