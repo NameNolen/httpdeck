@@ -39,12 +39,21 @@ jobs:
           New-Item -ItemType File -Force target/release/httpdeck-mcp.exe | Out-Null
           cargo build --release -p httpdeck-mcp
 
-      - name: Build Tauri app (NSIS installer)
-        run: npm run tauri build
-
       - name: Build egui binary
         if: ${{ hashFiles('src-egui/Cargo.toml') != '' }}
         run: cargo build --release -p httpdeck-egui
+
+      # 在打包安装包之前先对内部 exe 签名，保证安装包内的可执行文件也带签名
+      - name: Sign internal binaries
+        shell: pwsh
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+          SIGNING_CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+        run: scripts/sign.ps1 -Files target/release/httpdeck-mcp.exe,target/release/httpdeck-egui.exe
+
+      - name: Build Tauri app (NSIS installer)
+        run: npm run tauri build
 
       - name: Collect artifacts
         shell: pwsh
@@ -58,6 +67,16 @@ jobs:
             Copy-Item target/release/httpdeck-egui.exe dist-artifacts/
           }
           Get-ChildItem dist-artifacts | Format-Table Name, Length
+
+      # 对最终产物（含安装包）签名；未配置证书时脚本会直接跳过
+      - name: Sign final artifacts
+        if: ${{ secrets.SIGNING_CERT_BASE64 != '' || secrets.SIGNING_CERT_THUMBPRINT != '' }}
+        shell: pwsh
+        env:
+          SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+          SIGNING_CERT_THUMBPRINT: ${{ secrets.SIGNING_CERT_THUMBPRINT }}
+        run: scripts/sign.ps1 -Files (Get-ChildItem dist-artifacts -Filter *.exe | ForEach-Object FullName)
 
       - uses: actions/upload-artifact@v4
         with:
