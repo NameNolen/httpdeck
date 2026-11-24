@@ -68,9 +68,10 @@ jobs:
           }
           Get-ChildItem dist-artifacts | Format-Table Name, Length
 
-      # 对最终产物（含安装包）签名；未配置证书时脚本会直接跳过
+      # 对最终产物（含安装包）签名；未配置证书时脚本会直接跳过。
+      # 注意：不能在 if 条件里引用 secrets（GitHub 出于安全禁止），
+      # 是否跳过由 sign.ps1 内部判断。
       - name: Sign final artifacts
-        if: ${{ secrets.SIGNING_CERT_BASE64 != '' || secrets.SIGNING_CERT_THUMBPRINT != '' }}
         shell: pwsh
         env:
           SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
