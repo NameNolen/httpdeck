@@ -120,6 +120,10 @@ pub struct HttpDeckApp {
     running_requests: HashSet<(String, usize)>,
     /// 正在整体执行的文件（绝对路径）
     running_files: HashSet<String>,
+    /// 浮动请求面板：将请求列表从右侧面板中分离出来，作为可拖动的小面板常驻桌面
+    floating_requests: bool,
+    /// 浮动请求面板：完整模式 vs 精简模式
+    floating_full_mode: bool,
     status: String,
     error: Option<String>,
     file_dialog: Option<FileDialog>,
@@ -178,6 +182,8 @@ impl HttpDeckApp {
             running: 0,
             running_requests: HashSet::new(),
             running_files: HashSet::new(),
+            floating_requests: false,
+            floating_full_mode: false,
             status: String::new(),
             error: None,
             file_dialog: None,
@@ -1397,6 +1403,20 @@ impl HttpDeckApp {
                         self.requests_tab = RequestsTab::Globals;
                         self.refresh_globals();
                     }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let label = if self.floating_requests { "📌 取消" } else { "📌 置顶" };
+                            let hover = if self.floating_requests {
+                                "取消请求面板的浮动置顶模式"
+                            } else {
+                                "将请求面板钉到桌面，作为可拖动的小面板"
+                            };
+                            if ui.small_button(label).on_hover_text(hover).clicked() {
+                                self.floating_requests = !self.floating_requests;
+                            }
+                        },
+                    );
                 });
                 ui.separator();
                 let ctx = ui.ctx().clone();
@@ -1411,6 +1431,7 @@ impl HttpDeckApp {
     }
 
     /// 当前文件的请求列表
+    /// 每行布局：▶ 运行按钮 + 请求名（可选中）+ 状态图标
     fn requests_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::ScrollArea::vertical()
             .id_salt("requests")
@@ -1422,29 +1443,63 @@ impl HttpDeckApp {
                         ui.weak("当前文件没有可执行请求");
                     }
                     for (index, request) in parsed.requests.iter().enumerate() {
-                        let mut text = format!("{}  {}", request.method, request.display_name());
                         let running = self
                             .open_file
                             .as_deref()
                             .is_some_and(|file| self.request_is_running(file, index));
-                        if running {
-                            text.push_str("  [执行中]");
-                        } else if let Some(result) = self.results.get(&index) {
-                            text.push_str(&format!("  [{}]", result.status));
-                        }
-                        // 截断长名称，避免撑宽右侧面板
-                        let response = ui.add(
-                            egui::Button::selectable(self.selected_request == Some(index), text)
-                                .truncate(),
-                        );
-                        if response.clicked() {
-                            clicked = Some(index);
-                        }
-                        // 右键菜单：直接执行该请求，无需先切换选中项
-                        response.context_menu(|ui| {
-                            if ui.button("运行").clicked() {
+                        ui.horizontal(|ui| {
+                            // ▶ 运行按钮：点一下直接执行该请求
+                            let run_btn = ui
+                                .small_button("▶")
+                                .on_hover_text(format!(
+                                    "运行 #{index} {} {}",
+                                    request.method,
+                                    request.display_name()
+                                ));
+                            if run_btn.clicked() {
                                 run = Some(index);
-                                ui.close();
+                            }
+
+                            // 请求名：点击选中并跳转
+                            let label = format!("{} {}", request.method, request.display_name());
+                            let resp = ui.add(
+                                egui::Button::selectable(
+                                    self.selected_request == Some(index),
+                                    label,
+                                )
+                                .truncate(),
+                            );
+                            if resp.clicked() {
+                                clicked = Some(index);
+                            }
+                            resp.context_menu(|ui| {
+                                if ui.button("运行").clicked() {
+                                    run = Some(index);
+                                    ui.close();
+                                }
+                            });
+
+                            // 状态图标
+                            if running {
+                                ui.spinner();
+                            } else if let Some(result) = self.results.get(&index) {
+                                let color = if result.error.is_some() {
+                                    egui::Color32::from_rgb(230, 80, 80)
+                                } else if result.status >= 500 {
+                                    egui::Color32::from_rgb(230, 80, 80)
+                                } else if result.status >= 400 {
+                                    egui::Color32::from_rgb(230, 170, 70)
+                                } else {
+                                    egui::Color32::from_rgb(80, 200, 120)
+                                };
+                                let icon = if result.error.is_some() {
+                                    "×"
+                                } else if result.status >= 400 {
+                                    "!"
+                                } else {
+                                    "✓"
+                                };
+                                ui.colored_label(color, icon);
                             }
                         });
                     }
@@ -1984,7 +2039,148 @@ impl HttpDeckApp {
         self.render_file_dialog(&ctx);
         self.mcp_window(&ctx);
         self.settings_window(&ctx);
+        self.floating_requests_window(&ctx);
         rects
+    }
+
+    /// 浮动请求面板：主窗口内的可拖动小窗口，显示精简或完整的请求列表
+    fn floating_requests_window(&mut self, ctx: &egui::Context) {
+        if !self.floating_requests {
+            return;
+        }
+        let mut close_requested = false;
+        let mut switch_mode = None;
+        egui::Window::new("请求 📌")
+            .id(egui::Id::new("floating_requests"))
+            .resizable(true)
+            .collapsible(false)
+            .default_open(true)
+            .default_pos(egui::pos2(800.0, 200.0))
+            .default_size(if self.floating_full_mode {
+                [360.0, 520.0]
+            } else {
+                [240.0, 360.0]
+            })
+            .min_size([180.0, 200.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak(
+                        self.open_file
+                            .as_deref()
+                            .and_then(|path| path.file_name())
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("未打开文件"),
+                    );
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let full = self.floating_full_mode;
+                            let label = if full { "精简" } else { "完整" };
+                            if ui.small_button(label).on_hover_text("切换视图模式").clicked() {
+                                switch_mode = Some(!full);
+                            }
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("取消浮动面板")
+                                .clicked()
+                            {
+                                close_requested = true;
+                            }
+                        },
+                    );
+                });
+                ui.separator();
+                let ctx_clone = ctx.clone();
+                if self.floating_full_mode {
+                    egui::ScrollArea::vertical()
+                        .id_salt("floating_requests_full")
+                        .show(ui, |ui| {
+                            self.requests_list(ui, &ctx_clone);
+                        });
+                } else {
+                    self.floating_minimal_list(ui, &ctx_clone);
+                }
+            });
+        if close_requested {
+            self.floating_requests = false;
+        }
+        if let Some(next) = switch_mode {
+            self.floating_full_mode = next;
+        }
+    }
+
+    /// 精简模式的浮动请求列表：每行紧凑显示 ▶ 请求名 状态
+    fn floating_minimal_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        egui::ScrollArea::vertical()
+            .id_salt("floating_requests_minimal")
+            .show(ui, |ui| {
+                let mut clicked = None;
+                let mut run = None;
+                if let Some(parsed) = &self.parsed {
+                    if parsed.requests.is_empty() {
+                        ui.weak("无请求");
+                    }
+                    for (index, request) in parsed.requests.iter().enumerate() {
+                        let running = self
+                            .open_file
+                            .as_deref()
+                            .is_some_and(|file| self.request_is_running(file, index));
+                        ui.horizontal(|ui| {
+                            // ▶ 运行按钮
+                            if ui.small_button("▶").clicked() {
+                                run = Some(index);
+                            }
+
+                            // 请求名
+                            let name = request.display_name();
+                            let label = if name.is_empty() {
+                                format!("{} #{}", request.method, index + 1)
+                            } else {
+                                name.to_owned()
+                            };
+                            if ui.add(
+                                egui::Button::selectable(
+                                    self.selected_request == Some(index),
+                                    label,
+                                )
+                                .truncate(),
+                            ).clicked() {
+                                clicked = Some(index);
+                            }
+
+                            // 状态图标
+                            if running {
+                                ui.spinner();
+                            } else if let Some(result) = self.results.get(&index) {
+                                let color = if result.error.is_some() {
+                                    egui::Color32::from_rgb(230, 80, 80)
+                                } else if result.status >= 400 {
+                                    egui::Color32::from_rgb(230, 170, 70)
+                                } else {
+                                    egui::Color32::from_rgb(80, 200, 120)
+                                };
+                                let icon = if result.error.is_some() {
+                                    "×"
+                                } else if result.status >= 400 {
+                                    "!"
+                                } else {
+                                    "✓"
+                                };
+                                ui.colored_label(color, icon);
+                            }
+                        });
+                    }
+                } else {
+                    ui.weak("打开文件后显示");
+                }
+                if let Some(index) = clicked {
+                    self.jump_to_request(ctx, index);
+                }
+                if let Some(index) = run {
+                    self.selected_request = Some(index);
+                    self.run_selected(ctx);
+                }
+            });
     }
 
     /// 记录响应面板高度；拖拽结束后写入界面状态文件
@@ -2762,9 +2958,10 @@ mod tests {
                 rects.response
             );
         }
+        // 编辑区行首有 2 个 ▶，请求面板每行也有 1 个 ▶ small_button，共 4 个
         assert_eq!(
             texts.iter().filter(|text| text.as_str() == "▶").count(),
-            2,
+            4,
             "每个请求行应渲染一个运行按钮，实际: {texts:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -2859,9 +3056,11 @@ mod tests {
                 app.draw(ui);
             });
             output.textures_delta.clear();
+            // 取最后一个 "▶"——那是编辑区行首的自定义运行按钮（请求面板的 small_button 在前）
             let marker = output
                 .shapes
                 .iter()
+                .rev()
                 .find_map(|clipped| match &clipped.shape {
                     egui::Shape::Text(text) if text.galley.text() == "▶" => Some(text.pos),
                     _ => None,
