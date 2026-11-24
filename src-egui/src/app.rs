@@ -2039,74 +2039,65 @@ impl HttpDeckApp {
         self.render_file_dialog(&ctx);
         self.mcp_window(&ctx);
         self.settings_window(&ctx);
-        self.floating_requests_window(&ctx);
         rects
     }
 
-    /// 浮动请求面板：主窗口内的可拖动小窗口，显示精简或完整的请求列表
-    fn floating_requests_window(&mut self, ctx: &egui::Context) {
-        if !self.floating_requests {
+    /// 浮动请求面板所对应的独立系统窗口 ID
+    fn floating_viewport_id() -> egui::ViewportId {
+        egui::ViewportId::from_hash_of("httpdeck_floating_requests")
+    }
+
+    /// 渲染浮动请求面板（独立的置顶系统窗口）；主窗口最小化时它仍然可见
+    fn floating_viewport_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        // 用户点击原生关闭按钮
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.floating_requests = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        let mut close_requested = false;
-        let mut switch_mode = None;
-        egui::Window::new("请求 📌")
-            .id(egui::Id::new("floating_requests"))
-            .resizable(true)
-            .collapsible(false)
-            .default_open(true)
-            .default_pos(egui::pos2(800.0, 200.0))
-            .default_size(if self.floating_full_mode {
-                [360.0, 520.0]
-            } else {
-                [240.0, 360.0]
-            })
-            .min_size([180.0, 200.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.weak(
-                        self.open_file
-                            .as_deref()
-                            .and_then(|path| path.file_name())
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("未打开文件"),
-                    );
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            let full = self.floating_full_mode;
-                            let label = if full { "精简" } else { "完整" };
-                            if ui.small_button(label).on_hover_text("切换视图模式").clicked() {
-                                switch_mode = Some(!full);
-                            }
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("取消浮动面板")
-                                .clicked()
-                            {
-                                close_requested = true;
-                            }
-                        },
-                    );
-                });
-                ui.separator();
-                let ctx_clone = ctx.clone();
-                if self.floating_full_mode {
-                    egui::ScrollArea::vertical()
-                        .id_salt("floating_requests_full")
-                        .show(ui, |ui| {
-                            self.requests_list(ui, &ctx_clone);
-                        });
-                } else {
-                    self.floating_minimal_list(ui, &ctx_clone);
-                }
+        // 独立窗口也需要轮询任务，保证运行中状态实时刷新
+        self.poll_tasks(&ctx);
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            // 顶部标题栏：文件名 + 模式切换 + 关闭
+            ui.horizontal(|ui| {
+                ui.weak(
+                    self.open_file
+                        .as_deref()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("未打开文件"),
+                );
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        let full = self.floating_full_mode;
+                        if ui
+                            .small_button(if full { "精简" } else { "完整" })
+                            .on_hover_text("切换视图模式")
+                            .clicked()
+                        {
+                            self.floating_full_mode = !full;
+                        }
+                        if ui
+                            .small_button("关闭")
+                            .on_hover_text("关闭浮动面板")
+                            .clicked()
+                        {
+                            self.floating_requests = false;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    },
+                );
             });
-        if close_requested {
-            self.floating_requests = false;
-        }
-        if let Some(next) = switch_mode {
-            self.floating_full_mode = next;
-        }
+            ui.separator();
+            if self.floating_full_mode {
+                self.requests_list(ui, &ctx);
+            } else {
+                self.floating_minimal_list(ui, &ctx);
+            }
+        });
     }
 
     /// 精简模式的浮动请求列表：每行紧凑显示 ▶ 请求名 状态
@@ -2460,7 +2451,26 @@ pub struct LayoutRects {
 
 impl eframe::App for HttpDeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // 主窗口内容
         self.draw(ui);
+        // 浮动请求面板：作为独立的置顶系统窗口（immediate 视口），
+        // 主窗口最小化或切换到其他应用时它仍然可见、可拖动
+        if self.floating_requests {
+            let ctx = ui.ctx().clone();
+            let size = if self.floating_full_mode {
+                [360.0, 520.0]
+            } else {
+                [240.0, 360.0]
+            };
+            let builder = egui::ViewportBuilder::default()
+                .with_title("HttpDeck · 请求")
+                .with_inner_size(size)
+                .with_min_inner_size([180.0, 200.0])
+                .with_always_on_top();
+            ctx.show_viewport_immediate(Self::floating_viewport_id(), builder, |child_ui, _class| {
+                self.floating_viewport_ui(child_ui);
+            });
+        }
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
