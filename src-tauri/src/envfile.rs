@@ -16,6 +16,7 @@ impl EnvSet {
 
 type EnvMap = BTreeMap<String, Map<String, Value>>;
 
+#[cfg(feature = "desktop")]
 pub fn load_envs(root: &Path) -> EnvSet {
     let public = read_env_file(&root.join("http-client.env.json"));
     let private = read_env_file(&root.join("http-client.private.env.json"));
@@ -150,6 +151,7 @@ fn read_env_file(path: &Path) -> EnvMap {
     result
 }
 
+#[cfg(feature = "desktop")]
 fn merge(public: EnvMap, private: EnvMap) -> EnvSet {
     let mut names: Vec<String> = public
         .keys()
@@ -211,6 +213,7 @@ mod tests {
         result
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn merges_shared_and_private() {
         let public = to_env_map(json!({

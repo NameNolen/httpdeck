@@ -9,7 +9,8 @@ name = "httpdeck-egui"
 path = "src/main.rs"
 
 [dependencies]
-httpdeck = { path = "../src-tauri" }
+# 不启用 desktop 特性，避免为 egui 程序引入 tauri/webkit 依赖
+httpdeck = { path = "../src-tauri", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -21,3 +22,8 @@ eframe = { version = "0.37.0", default-features = false, features = [
     "links",
 ] }
 egui = "0.37.0"
+# Linux 使用 ksni（纯 DBus）后端，无需 GTK/libappindicator
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+
+[build-dependencies]
+embed-resource = "3"

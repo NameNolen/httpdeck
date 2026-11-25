@@ -1,0 +1,2 @@
+// Windows 可执行文件资源：把应用图标嵌入 exe，资源管理器和任务栏才能显示图标
+1 ICON "../src-tauri/icons/icon.ico"

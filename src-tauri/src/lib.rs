@@ -13,13 +13,13 @@ pub mod recent;
 pub mod workspace;
 
 use cookies::SharedCookieStore;
-use models::{
-    CookieInfo, FileRunResult, HistoryEntry, KeyValue, McpStatus, ParsedFileOutput, RequestResult,
-    WorkspaceInfo,
-};
+#[cfg(feature = "desktop")]
+use models::{CookieInfo, ParsedFileOutput};
+use models::{FileRunResult, HistoryEntry, KeyValue, McpStatus, RequestResult, WorkspaceInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "desktop")]
 use tauri::State;
 
 pub struct WorkspaceRuntime {
@@ -48,6 +48,7 @@ fn clear_cancel_token(state: &AppState) {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn cancel_run(state: State<'_, AppState>) {
     if let Ok(guard) = state.cancel_token.lock() {
@@ -57,6 +58,7 @@ fn cancel_run(state: State<'_, AppState>) {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
     let target = PathBuf::from(&path);
@@ -77,6 +79,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn list_history(workspace: String) -> Result<Vec<HistoryEntry>, String> {
     list_history_for(&workspace)
@@ -88,6 +91,7 @@ pub fn list_history_for(workspace: &str) -> Result<Vec<HistoryEntry>, String> {
     Ok(history::list(&root))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn clear_history(workspace: String) -> Result<(), String> {
     let root = canonical_root(&workspace)?;
@@ -106,6 +110,7 @@ fn load_recent_files(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[cfg(feature = "desktop")]
 fn save_recent_files(root: &Path, files: &[String]) -> Result<(), String> {
     let path = recent_files_path(root);
     if let Some(parent) = path.parent() {
@@ -151,6 +156,7 @@ fn absolute_recent_files(root: &Path, files: &[String]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn list_recent_files(workspace: String) -> Result<Vec<String>, String> {
     list_recent_files_for(&workspace)
@@ -162,6 +168,7 @@ pub fn list_recent_files_for(workspace: &str) -> Result<Vec<String>, String> {
     Ok(absolute_recent_files(&root, &load_recent_files(&root)))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn record_recent_file(workspace: String, file: String) -> Result<Vec<String>, String> {
     let root = canonical_root(&workspace)?;
@@ -175,6 +182,7 @@ fn record_recent_file(workspace: String, file: String) -> Result<Vec<String>, St
     Ok(absolute_recent_files(&root, &files))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn clear_recent_files(workspace: String) -> Result<(), String> {
     let root = canonical_root(&workspace)?;
@@ -222,6 +230,7 @@ fn store_globals(state: &AppState, root: &Path, globals: HashMap<String, String>
     let _ = save_globals(root, &globals);
 }
 
+#[cfg(feature = "desktop")]
 fn build_workspace_info(state: &AppState, root: &Path) -> Result<WorkspaceInfo, String> {
     let config = workspace::load_config(root);
     let envs = envfile::load_envs(root);
@@ -255,6 +264,7 @@ fn build_workspace_info(state: &AppState, root: &Path) -> Result<WorkspaceInfo, 
     })
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn initial_workspace() -> Option<String> {
     std::env::args()
@@ -262,11 +272,13 @@ fn initial_workspace() -> Option<String> {
         .find(|arg| Path::new(arg).is_dir())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn recent_workspaces() -> Vec<String> {
     recent::list()
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn open_workspace(state: State<'_, AppState>, path: String) -> Result<WorkspaceInfo, String> {
     let root = canonical_root(&path)?;
@@ -286,6 +298,7 @@ fn open_workspace(state: State<'_, AppState>, path: String) -> Result<WorkspaceI
     Ok(info)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn close_workspace(state: State<'_, AppState>, workspace: String) -> Result<(), String> {
     let root = std::fs::canonicalize(&workspace).unwrap_or_else(|_| PathBuf::from(&workspace));
@@ -296,23 +309,27 @@ fn close_workspace(state: State<'_, AppState>, workspace: String) -> Result<(), 
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn refresh_workspace(state: State<'_, AppState>, workspace: String) -> Result<WorkspaceInfo, String> {
     let root = canonical_root(&workspace)?;
     build_workspace_info(&state, &root)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn read_http_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("读取文件失败 {path}: {e}"))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn save_http_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| format!("保存文件失败 {path}: {e}"))
 }
 
 /// 校验用户输入的文件名，不允许路径分隔符与上级目录引用
+#[cfg(feature = "desktop")]
 fn validate_file_name(raw: &str) -> Result<String, String> {
     let name = raw.trim();
     if name.is_empty() {
@@ -325,6 +342,7 @@ fn validate_file_name(raw: &str) -> Result<String, String> {
 }
 
 /// 新建文件时未写扩展名则补 `.http`
+#[cfg(feature = "desktop")]
 fn with_http_extension(name: &str) -> String {
     if name.contains('.') {
         name.to_string()
@@ -333,6 +351,7 @@ fn with_http_extension(name: &str) -> String {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn create_http_file(
     state: State<'_, AppState>,
@@ -360,6 +379,7 @@ fn create_http_file(
     Ok((info, target.to_string_lossy().to_string()))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn rename_http_file(
     state: State<'_, AppState>,
@@ -407,6 +427,7 @@ fn rename_http_file(
 }
 
 /// 生成「同名 + 序号」的不重复路径：api.http -> api1.http -> api2.http
+#[cfg(feature = "desktop")]
 fn duplicate_target(source: &Path) -> Result<PathBuf, String> {
     let dir = source
         .parent()
@@ -440,6 +461,7 @@ fn duplicate_target(source: &Path) -> Result<PathBuf, String> {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn duplicate_http_file(
     state: State<'_, AppState>,
@@ -459,6 +481,7 @@ fn duplicate_http_file(
 }
 
 /// 另存为：把源文件原样复制到指定位置
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn export_http_file(source: String, target: String) -> Result<(), String> {
     let src = PathBuf::from(&source);
@@ -469,6 +492,7 @@ fn export_http_file(source: String, target: String) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn delete_http_file(
     state: State<'_, AppState>,
@@ -498,6 +522,7 @@ fn delete_http_file(
     build_workspace_info(&state, &root)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn parse_http_file(path: String) -> Result<ParsedFileOutput, String> {
     let content = std::fs::read_to_string(&path)
@@ -505,11 +530,13 @@ fn parse_http_file(path: String) -> Result<ParsedFileOutput, String> {
     Ok(parser::parse(&content).to_output())
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn parse_http_text(content: String) -> ParsedFileOutput {
     parser::parse(&content).to_output()
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_pinned(
     state: State<'_, AppState>,
@@ -535,6 +562,7 @@ fn set_pinned(
     build_workspace_info(&state, &root)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_env(
     state: State<'_, AppState>,
@@ -548,6 +576,7 @@ fn set_env(
     build_workspace_info(&state, &root)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_proxy(
     state: State<'_, AppState>,
@@ -562,6 +591,7 @@ fn set_proxy(
 }
 
 /// 保存 mTLS 客户端证书 / 私钥路径配置
+#[cfg(feature = "desktop")]
 fn update_client_cert_config(
     root: &Path,
     cert: Option<String>,
@@ -573,6 +603,7 @@ fn update_client_cert_config(
     workspace::save_config(root, &config)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn set_client_cert(
     state: State<'_, AppState>,
@@ -587,6 +618,7 @@ fn set_client_cert(
 
 // ---- MCP Server 管理 ----
 
+#[cfg(feature = "desktop")]
 const MCP_DEFAULT_PORT: u16 = 18787;
 
 /// 供 egui / MCP 等非 tauri 上下文读取 MCP Server 状态
@@ -603,12 +635,14 @@ pub fn mcp_status() -> McpStatus {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_mcp_status() -> McpStatus {
     mcp_status()
 }
 
 // async 命令在独立线程执行：spawn/sleep/taskkill 不会阻塞主线程 UI
+#[cfg(feature = "desktop")]
 #[tauri::command(async)]
 fn start_mcp_server() -> Result<McpStatus, String> {
     // 已在运行则直接返回，不重复启动
@@ -645,6 +679,7 @@ fn start_mcp_server() -> Result<McpStatus, String> {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command(async)]
 fn stop_mcp_server() -> Result<McpStatus, String> {
     let info = mcp_lock::read_info().ok_or_else(|| "MCP server 未运行".to_string())?;
@@ -652,6 +687,7 @@ fn stop_mcp_server() -> Result<McpStatus, String> {
     Ok(mcp_status())
 }
 
+#[cfg(feature = "desktop")]
 fn mcp_status_from_info(info: &mcp_lock::McpServerInfo) -> McpStatus {
     McpStatus {
         running: true,
@@ -704,6 +740,7 @@ fn load_identity(root: &Path) -> Result<Option<reqwest::Identity>, String> {
         .map_err(|e| format!("加载客户端证书失败: {e}"))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn get_globals(state: State<'_, AppState>, workspace: String) -> Result<Vec<KeyValue>, String> {
     get_globals_for(&state, &workspace)
@@ -721,6 +758,7 @@ pub fn get_globals_for(state: &AppState, workspace: &str) -> Result<Vec<KeyValue
     Ok(list)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn clear_globals(state: State<'_, AppState>, workspace: String) -> Result<(), String> {
     clear_globals_for(&state, &workspace)
@@ -734,6 +772,7 @@ pub fn clear_globals_for(state: &AppState, workspace: &str) -> Result<(), String
 }
 
 /// 列出指定文件目录层级下当前环境生效的变量，用于编辑器补全。
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn list_variables(
     workspace: String,
@@ -822,6 +861,7 @@ pub async fn run_single_request(
     Ok(result)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn run_request(
     state: State<'_, AppState>,
@@ -877,6 +917,7 @@ pub async fn run_http_file(
     Ok(results)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn run_file(
     state: State<'_, AppState>,
@@ -958,6 +999,7 @@ pub async fn run_http_folder(
     Ok(output)
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 async fn run_folder(
     state: State<'_, AppState>,
@@ -968,6 +1010,7 @@ async fn run_folder(
     run_http_folder(&state, &workspace, &folder, env.as_deref()).await
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn list_cookies(state: State<'_, AppState>, workspace: String) -> Result<Vec<CookieInfo>, String> {
     let root = canonical_root(&workspace)?;
@@ -975,6 +1018,7 @@ fn list_cookies(state: State<'_, AppState>, workspace: String) -> Result<Vec<Coo
     Ok(cookies::list(&cookies))
 }
 
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn clear_cookies(state: State<'_, AppState>, workspace: String) -> Result<(), String> {
     let root = canonical_root(&workspace)?;
@@ -983,6 +1027,7 @@ fn clear_cookies(state: State<'_, AppState>, workspace: String) -> Result<(), St
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()

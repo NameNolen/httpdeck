@@ -9,7 +9,7 @@ use httpdeck_lib::models::{
 use httpdeck_lib::parser::{self, ParsedHttpFile};
 use httpdeck_lib::{history, recent, workspace};
 
-use crate::{response, tree};
+use crate::{response, tree, tray};
 
 enum TaskMsg {
     Done {
@@ -2451,7 +2451,19 @@ pub struct LayoutRects {
 
 impl eframe::App for HttpDeckApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // 主窗口内容
+        // --- 托盘集成 -------------------------------------------------------
+        // 关闭按钮：有托盘时隐藏到托盘；托盘申请退出（或托盘不可用）时正常关闭
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            if tray::quit_requested() || !tray::available() {
+                // 不取消关闭：eframe 会保存状态并退出进程
+            } else {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+
+        // --- 主窗口内容 -------------------------------------------------------
         self.draw(ui);
         // 浮动请求面板：作为独立的置顶系统窗口（immediate 视口），
         // 主窗口最小化或切换到其他应用时它仍然可见、可拖动
